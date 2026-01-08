@@ -120,10 +120,14 @@ namespace Connect4 {
         const std::vector<Player>& who_moves,
         const torch::Device& device) {
         size_t batch_size = states.size();
+
+        // Create tensor on the correct device
         torch::Tensor batch = torch::zeros({ static_cast<int64_t>(batch_size), 2, GAME_ROWS, GAME_COLS },
             torch::dtype(torch::kFloat32).device(device));
 
-        auto batch_accessor = batch.accessor<float, 4>();
+        // If on CUDA, ensure we're operating on CPU copies first
+        torch::Tensor batch_cpu = batch.is_cuda() ? batch.cpu() : batch;
+        auto batch_accessor = batch_cpu.accessor<float, 4>();
 
         for (size_t idx = 0; idx < batch_size; ++idx) {
             const auto& state = states[idx];
@@ -131,8 +135,21 @@ namespace Connect4 {
 
             // Fill the tensor based on game state
             for (int col = 0; col < GAME_COLS; ++col) {
-                for (int row = 0; row < state.heights[col]; ++row) {
+                // ADD BOUNDS CHECKING HERE - this is the critical fix!
+                int max_height = std::min(static_cast<int>(state.heights[col]), GAME_ROWS);
+
+                for (int row = 0; row < max_height; ++row) {
+                    // Calculate tensor row (flip vertically for display)
                     int tensor_row = GAME_ROWS - 1 - row;
+
+                    // ADD BOUNDS CHECKING for tensor_row
+                    if (tensor_row < 0 || tensor_row >= GAME_ROWS) {
+                        std::cerr << "Warning: Invalid tensor_row " << tensor_row
+                            << " for row " << row << ", col " << col
+                            << ", height " << state.heights[col] << std::endl;
+                        continue;
+                    }
+
                     int pos = row * GAME_COLS + col;
                     uint64_t bit = 1ULL << pos;
 
@@ -157,6 +174,11 @@ namespace Connect4 {
                     }
                 }
             }
+        }
+
+        // If we were working on CPU copy for CUDA tensor, copy back
+        if (batch.is_cuda()) {
+            batch.copy_(batch_cpu);
         }
 
         return batch;
