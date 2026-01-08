@@ -12,6 +12,8 @@
 #include <optional>
 #include <numeric>
 #include <unordered_map>
+#include <csignal>
+#include <atomic>
 
 #include <torch/torch.h>
 #include <torch/script.h>
@@ -39,6 +41,24 @@ constexpr float BEST_NET_WIN_RATIO = 0.60f;
 constexpr int EVALUATE_EVERY_STEP = 100;
 constexpr int EVALUATION_ROUNDS = 20;
 constexpr int STEPS_BEFORE_TAU_0 = 10;
+
+// Global flag for termination handling
+std::atomic<bool> terminate_requested(false);
+std::atomic<bool> saving_checkpoint(false);
+
+// Signal handler for graceful shutdown
+void signal_handler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        std::cout << "\n\nTermination signal received. Gracefully shutting down..." << std::endl;
+
+        if (saving_checkpoint) {
+            std::cout << "Currently saving checkpoint, please wait..." << std::endl;
+            return;
+        }
+
+        terminate_requested = true;
+    }
+}
 
 class TargetNet {
 public:
@@ -173,12 +193,14 @@ void print_help() {
 
 void save_model(Connect4Net& net, const std::string& path) {
     try {
+        saving_checkpoint = true;
         torch::save(net, path);
         std::cout << "Model saved to: " << path << std::endl;
     }
     catch (const c10::Error& e) {
         std::cerr << "Error saving model: " << e.what() << std::endl;
     }
+    saving_checkpoint = false;
 }
 
 void load_model(Connect4Net& net, const std::string& path, const torch::Device& device) {
@@ -197,7 +219,38 @@ void load_model(Connect4Net& net, const std::string& path, const torch::Device& 
     }
 }
 
+// Function to save final checkpoint and exit
+void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx, int best_idx) {
+    std::cout << "\nSaving final checkpoint before exit..." << std::endl;
+
+    // Save final checkpoint
+    std::ostringstream final_filename;
+    final_filename << "final_checkpoint_" << std::setw(5) << std::setfill('0') << step_idx << ".pt";
+    fs::path final_save_path = saves_path / final_filename.str();
+    save_model(net, final_save_path.string());
+
+    // Save training progress info
+    std::ostringstream progress_filename;
+    progress_filename << "training_progress_" << std::setw(5) << std::setfill('0') << step_idx << ".txt";
+    fs::path progress_path = saves_path / progress_filename.str();
+
+    std::ofstream progress_file(progress_path);
+    if (progress_file.is_open()) {
+        progress_file << "step_idx=" << step_idx << std::endl;
+        progress_file << "best_idx=" << best_idx << std::endl;
+        progress_file << "timestamp=" << std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) << std::endl;
+        progress_file.close();
+        std::cout << "Training progress saved to: " << progress_path.string() << std::endl;
+    }
+
+    std::cout << "Graceful shutdown complete. Exiting..." << std::endl;
+}
+
 int main(int argc, char** argv) {
+    // Setup signal handlers for graceful shutdown
+    std::signal(SIGINT, signal_handler);  // Ctrl+C
+    std::signal(SIGTERM, signal_handler); // Termination request
+
     // Parse command line arguments
     std::string run_name;
     std::string device_str = "cpu";
@@ -315,14 +368,17 @@ int main(int argc, char** argv) {
     SimpleTracker tracker(csv_logger, 10);
     std::mt19937 rng(std::random_device{}());
 
-    // Training loop
-    while (true) {
+    // Training loop with termination handling
+    while (!terminate_requested) {
         auto start_time = std::chrono::high_resolution_clock::now();
         int game_steps = 0;
         int total_leaves = 0; // Track leaves properly
 
+        // Check for termination before starting episodes
+        if (terminate_requested) break;
+
         // Play episodes
-        for (int episode_idx = 0; episode_idx < PLAY_EPISODES; ++episode_idx) {
+        for (int episode_idx = 0; episode_idx < PLAY_EPISODES && !terminate_requested; ++episode_idx) {
             // Create FRESH MCTS stores for this game
             MCTS mcts_store(1.0f); // Start with empty store for each game
             std::vector<MCTS> mcts_stores;
@@ -371,6 +427,9 @@ int main(int argc, char** argv) {
 
         step_idx++;
 
+        // Check for termination after episodes
+        if (terminate_requested) break;
+
         // Check if we have enough data to train
         if (replay_buffer.size() < MIN_REPLAY_TO_TRAIN) {
             std::cout << "Not enough samples in replay buffer. Waiting... ("
@@ -383,7 +442,7 @@ int main(int argc, char** argv) {
         float sum_value_loss = 0.0f;
         float sum_policy_loss = 0.0f;
 
-        for (int train_round = 0; train_round < TRAIN_ROUNDS; ++train_round) {
+        for (int train_round = 0; train_round < TRAIN_ROUNDS && !terminate_requested; ++train_round) {
             // Sample batch from replay buffer
             std::vector<std::tuple<GameState, Player, std::array<float, GAME_COLS>, float>> batch;
             batch.reserve(BATCH_SIZE);
@@ -462,7 +521,9 @@ int main(int argc, char** argv) {
         tracker.track("loss_value", sum_value_loss / TRAIN_ROUNDS, step_idx);
         tracker.track("loss_policy", sum_policy_loss / TRAIN_ROUNDS, step_idx);
 
-        // Evaluation phase
+        // Check for termination after training phase
+        if (terminate_requested) break;
+
         // Evaluation phase
         if (step_idx % EVALUATE_EVERY_STEP == 0) {
             std::cout << "Evaluating network..." << std::endl;
@@ -502,6 +563,9 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Check for termination after evaluation
+        if (terminate_requested) break;
+
         // Save checkpoint every 1000 steps
         if (step_idx % 1000 == 0) {
             std::ostringstream filename;
@@ -510,6 +574,12 @@ int main(int argc, char** argv) {
             save_model(net, save_path.string());
             std::cout << "Saved checkpoint to: " << save_path.string() << std::endl;
         }
+    }
+
+    // Handle graceful shutdown
+    if (terminate_requested) {
+        save_and_exit(net, saves_path, step_idx, best_idx);
+        return 0;
     }
 
     return 0;
