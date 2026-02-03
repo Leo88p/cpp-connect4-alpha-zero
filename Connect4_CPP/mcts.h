@@ -30,7 +30,6 @@ namespace Connect4 {
     class MCTS {
     public:
         explicit MCTS(float c_puct = 1.0f);
-        MCTS(const MCTS& other); // Proper copy constructor
 
         void clear();
         size_t size() const;

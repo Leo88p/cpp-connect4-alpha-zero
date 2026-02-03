@@ -41,6 +41,8 @@ namespace Connect4 {
 
         float result = std::numeric_limits<float>::quiet_NaN();
         float net1_result = std::numeric_limits<float>::quiet_NaN();
+        std::random_device rd;
+        std::mt19937 gen(rd());
 
         while (std::isnan(result)) {
             if (cur_player_int >= static_cast<int>(mcts_stores.size())) {
@@ -57,8 +59,6 @@ namespace Connect4 {
             // Select action based on probabilities
             std::vector<float> probs_vec(probs.begin(), probs.end());
             std::discrete_distribution<int> dist(probs_vec.begin(), probs_vec.end());
-            std::random_device rd;
-            std::mt19937 gen(rd());
             int action = dist(gen);
 
             if (!state.is_valid_move(action)) {
@@ -103,7 +103,7 @@ namespace Connect4 {
             float current_result = result;
             for (auto it = game_history.rbegin(); it != game_history.rend(); ++it) {
                 const auto& [s, p, pr] = *it;
-                replay_buffer->push_back(std::make_tuple(s, p, pr, -current_result));
+                replay_buffer->push_back(std::make_tuple(s, p, pr, current_result));
                 current_result = -current_result;
 
                 // Maintain buffer size limit

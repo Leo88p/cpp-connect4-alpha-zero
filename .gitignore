@@ -19,6 +19,7 @@ mono_crash.*
 
 # Build results
 [Dd]ebug/
+ToPython/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
