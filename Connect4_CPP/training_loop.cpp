@@ -30,26 +30,15 @@ using namespace Connect4;
 
 // Hyperparameters - fixed for Connect4 AlphaZero
 constexpr int PLAY_EPISODES = 1;
-constexpr int INITIAL_MCTS_SEARCHES = 8;  // Starting MCTS searches
+constexpr int MCTS_SEARCHES = 10;  // Starting MCTS searches
 constexpr int MCTS_BATCH_SIZE = 64;
 constexpr size_t REPLAY_BUFFER_SIZE = 200000; // Critical fix: much larger buffer
-constexpr float INITIAL_LEARNING_RATE = 0.2f; // AlphaZero standard
-constexpr float MOMENTUM = 0.9f;
-constexpr float WEIGHT_DECAY = 1e-4f; // L2 regularization
+constexpr float LEARNING_RATE = 0.001f; // AlphaZero standard
 constexpr int BATCH_SIZE = 256;
 constexpr int TRAIN_ROUNDS = 10;
 constexpr size_t MIN_REPLAY_TO_TRAIN = 2000;
-constexpr float CONSERVATIVE_WIN_RATIO = 0.55f; // More conservative threshold
-constexpr int EVALUATE_EVERY_STEP = 200;
-constexpr int EVALUATION_ROUNDS = 100;
 constexpr int STEPS_BEFORE_TAU_0 = 10;
-constexpr int ROLLING_EVAL_WINDOW = 1; // Increased for more stable evaluation
-constexpr float MCTS_INCREASE_THRESHOLD = 0.8f; // Win ratio threshold to increase MCTS
-constexpr bool CLEAR_BUFFER_ON_MCTS_INCREASE = true; // Whether to clear replay buffer when MCTS increases
-constexpr float WARM_START_RATIO = 0.0f; // Keep 20% of recent data when clearing buffer
 
-// MCTS progression schedule - start low, increase gradually
-const std::vector<int> MCTS_SCHEDULE = { 8, 16, 32, 64, 128, 256, 512 };
 
 // Global flag for termination handling
 std::atomic<bool> terminate_requested(false);
@@ -112,32 +101,6 @@ private:
     Connect4Net model_;
 };
 
-float evaluate(Connect4Net& net1, Connect4Net& net2, int rounds, const torch::Device& device, int mcts_searches) {
-    int n1_win = 0, n2_win = 0;
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
-    for (int r_idx = 0; r_idx < rounds; ++r_idx) {
-        std::vector<MCTS> mcts_stores;
-        mcts_stores.push_back(MCTS());  // Player 1's MCTS store
-        mcts_stores.push_back(MCTS());  // Player 2's MCTS store
-        auto [result, _] = play_game(
-            mcts_stores, nullptr, net1, net2,
-            0, mcts_searches, MCTS_BATCH_SIZE, std::nullopt, device, REPLAY_BUFFER_SIZE
-        );
-
-        if (result < -0.5f) {
-            n2_win++;
-        }
-        else if (result > 0.5f) {
-            n1_win++;
-        }
-    }
-
-    return static_cast<float>(n1_win) / (n1_win + n2_win + 1e-8f);
-}
-
 void print_help() {
     std::cout << "Usage: connect4_az -n <run_name> [--dev <device>] [--net <filename>]" << std::endl;
     std::cout << "  -n, --name    Name of the run (required)" << std::endl;
@@ -174,7 +137,7 @@ void load_model(Connect4Net& net, const std::string& path, const torch::Device& 
 }
 
 // Function to save final checkpoint and exit
-void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx, int best_idx, int current_mcts_idx) {
+void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx) {
     std::cout << "\nSaving final checkpoint before exit..." << std::endl;
 
     // Save final checkpoint
@@ -191,28 +154,12 @@ void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx, i
     std::ofstream progress_file(progress_path);
     if (progress_file.is_open()) {
         progress_file << "step_idx=" << step_idx << std::endl;
-        progress_file << "best_idx=" << best_idx << std::endl;
-        progress_file << "current_mcts_idx=" << current_mcts_idx << std::endl;
-        progress_file << "current_mcts_searches=" << MCTS_SCHEDULE[current_mcts_idx] << std::endl;
         progress_file << "timestamp=" << std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) << std::endl;
         progress_file.close();
         std::cout << "Training progress saved to: " << progress_path.string() << std::endl;
     }
 
     std::cout << "Graceful shutdown complete. Exiting..." << std::endl;
-}
-
-// Learning rate schedule - match AlphaZero paper
-float get_learning_rate(int step_idx) {
-    if (step_idx < 400000) {
-        return INITIAL_LEARNING_RATE;
-    }
-    else if (step_idx < 600000) {
-        return INITIAL_LEARNING_RATE * 0.1f; // 10x decay
-    }
-    else {
-        return INITIAL_LEARNING_RATE * 0.01f; // Another 10x decay
-    }
 }
 
 // Clear replay buffer but optionally keep recent data for warm start
@@ -259,15 +206,6 @@ int main(int argc, char** argv) {
 
     std::cout << "Starting training with name: " << run_name << std::endl;
     std::cout << "Device: " << device_str << std::endl;
-    std::cout << "Dynamic MCTS schedule: ";
-    for (size_t i = 0; i < MCTS_SCHEDULE.size(); ++i) {
-        std::cout << MCTS_SCHEDULE[i];
-        if (i < MCTS_SCHEDULE.size() - 1) std::cout << " -> ";
-    }
-    std::cout << std::endl;
-    std::cout << "MCTS increase threshold: " << MCTS_INCREASE_THRESHOLD
-        << ", Clear buffer on increase: " << (CLEAR_BUFFER_ON_MCTS_INCREASE ? "true" : "false")
-        << ", Warm start ratio: " << WARM_START_RATIO << std::endl;
 
     if (!net_to_load.empty()) {
         std::cout << "Loading network from: " << net_to_load << std::endl;
@@ -313,45 +251,35 @@ int main(int argc, char** argv) {
     }
     net->to(device);
 
-    // Initialize best_net and etalon_net
-    TargetNet best_net(net);
+    // Initialize ONLY etalon_net for curriculum purposes (no best_net)
     TargetNet etalon_net(net);  // Etalon model starts as current model
 
     // Print network architecture
     std::cout << *net << std::endl;
 
     // CORRECT AlphaZero optimizer: SGD with momentum + weight decay
-    torch::optim::SGDOptions sgd_opts(INITIAL_LEARNING_RATE);
-    sgd_opts.momentum(MOMENTUM).weight_decay(WEIGHT_DECAY);
+    torch::optim::SGDOptions sgd_opts(LEARNING_RATE);
     torch::optim::SGD optimizer(net->parameters(), sgd_opts);
 
     // Replay buffer
     ReplayBuffer replay_buffer;
 
-    // Training state
+    // Training state - removed best_idx, kept etalon_idx for curriculum tracking
     int step_idx = 0;
-    int best_idx = 0;
-    int etalon_idx = 0;  // Index for etalon model
-    int current_mcts_idx = 0;  // Current index in MCTS_SCHEDULE
-    int current_mcts_searches = MCTS_SCHEDULE[current_mcts_idx];
 
-    std::cout << "Starting with MCTS searches: " << current_mcts_searches << std::endl;
-
-    std::deque<float> rolling_win_ratios;
     std::deque<float> rolling_etalon_ratios;  // For tracking win rate against etalon
 
     if (!net_to_load.empty()) {
         try {
-            // Parse step_idx, best_idx, and potentially mcts state from filename
+            // Parse step_idx and potentially mcts state from filename
             std::string filename = net_to_load;
             size_t underscore1 = filename.find('_');
             size_t underscore2 = filename.find('_', underscore1 + 1);
             size_t dot = filename.find('.');
 
             if (underscore1 != std::string::npos && underscore2 != std::string::npos && dot != std::string::npos) {
-                best_idx = std::stoi(filename.substr(underscore1 + 1, underscore2 - underscore1 - 1));
                 step_idx = std::stoi(filename.substr(underscore2 + 1, dot - underscore2 - 1));
-                std::cout << "Resuming from step " << step_idx << ", best index " << best_idx << std::endl;
+                std::cout << "Resuming from step " << step_idx << std::endl;
             }
         }
         catch (const std::exception& e) {
@@ -371,19 +299,17 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        // Play episodes using current MCTS searches
+        // Play episodes using CURRENT MODEL (AlphaZero paper approach)
         for (int episode_idx = 0; episode_idx < PLAY_EPISODES && !terminate_requested; ++episode_idx) {
             std::vector<MCTS> mcts_stores;
             mcts_stores.push_back(MCTS(1.0f));  // Player 0
             mcts_stores.push_back(MCTS(1.0f));  // Player 1
 
-            // Use best_net for self-play generation
-            auto best_model = best_net.get_model();
-
+            // CRITICAL CHANGE: Use current model (net) for self-play generation
             auto [game_result, steps] = play_game(
                 mcts_stores, &replay_buffer,
-                best_model, best_model,
-                STEPS_BEFORE_TAU_0, current_mcts_searches, MCTS_BATCH_SIZE,
+                net, net,  // Both players use CURRENT model
+                STEPS_BEFORE_TAU_0, MCTS_SEARCHES, MCTS_BATCH_SIZE,
                 std::nullopt, device, REPLAY_BUFFER_SIZE
             );
 
@@ -403,7 +329,6 @@ int main(int argc, char** argv) {
 
         tracker.track("speed_steps", speed_steps, step_idx);
         tracker.track("speed_nodes", speed_nodes, step_idx);
-        tracker.track("mcts_searches", static_cast<float>(current_mcts_searches), step_idx);
 
         // Print the same format as Python version + MCTS info
         std::cout << std::fixed << std::setprecision(2);
@@ -412,9 +337,6 @@ int main(int argc, char** argv) {
             << ", leaves " << std::setw(4) << game_nodes
             << ", steps/s " << std::setw(5) << speed_steps
             << ", leaves/s " << std::setw(6) << speed_nodes
-            << ", best_idx " << best_idx
-            << ", etalon_idx " << etalon_idx
-            << ", MCTS " << current_mcts_searches
             << ", replay " << replay_buffer.size() << std::endl;
 
         step_idx++;
@@ -430,10 +352,9 @@ int main(int argc, char** argv) {
         }
 
         // Update learning rate according to AlphaZero schedule
-        float current_lr = get_learning_rate(step_idx);
         for (auto& group : optimizer.param_groups()) {
             auto& options = static_cast<torch::optim::SGDOptions&>(group.options());
-            options.lr(current_lr);
+            options.lr(LEARNING_RATE);
         }
 
         // Training phase
@@ -453,25 +374,8 @@ int main(int argc, char** argv) {
 
             // Prioritized sampling based on data age (recent data has higher priority)
             size_t buffer_size = std::min(replay_buffer.size(), static_cast<size_t>(200000));
-            std::vector<float> priorities(buffer_size);
-            float total_priority = 0.0f;
 
-            // Calculate priorities - exponential decay based on age
-            for (size_t i = 0; i < buffer_size; ++i) {
-                float age = static_cast<float>(buffer_size - 1 - i);
-                float priority = std::exp(-age / 50000.0f); // Adjust decay constant based on buffer size
-                priorities[i] = priority;
-                total_priority += priority;
-            }
-
-            // Normalize priorities to create discrete distribution
-            if (total_priority > 0.0f) {
-                for (float& p : priorities) {
-                    p /= total_priority;
-                }
-            }
-
-            std::discrete_distribution<size_t> dist(priorities.begin(), priorities.end());
+            std::uniform_int_distribution<> dist(0, BATCH_SIZE - 1);
 
             for (int i = 0; i < BATCH_SIZE; ++i) {
                 size_t idx = dist(rng);
@@ -544,158 +448,23 @@ int main(int argc, char** argv) {
         // Check for termination after training phase
         if (terminate_requested) break;
 
-        // Evaluation phase - with rolling average
-        if (step_idx % EVALUATE_EVERY_STEP == 0) {
-            std::cout << "\n=== Evaluation Phase ===" << std::endl;
-            std::cout << "Current MCTS searches: " << current_mcts_searches
-                << " (level " << current_mcts_idx + 1 << "/" << MCTS_SCHEDULE.size() << ")" << std::endl;
-
-            // First evaluate against best model (for best_net updates)
-            std::cout << "Evaluating against best model (roll " << rolling_win_ratios.size() + 1
-                << "/" << ROLLING_EVAL_WINDOW << ")..." << std::endl;
-
-            // Get models first to create lvalues
-            Connect4Net current_net = net;
-            Connect4Net best_net_model = best_net.get_model();
-
-            float win_ratio = evaluate(current_net, best_net_model, EVALUATION_ROUNDS, device, current_mcts_searches);
-            rolling_win_ratios.push_back(win_ratio);
-
-            if (rolling_win_ratios.size() > ROLLING_EVAL_WINDOW) {
-                rolling_win_ratios.pop_front();
-            }
-
-            std::cout << "Win ratio vs best model: " << std::fixed << std::setprecision(3)
-                << win_ratio << std::endl;
-
-            // Log evaluation result
-            if (csv_logger.is_open()) {
-                csv_logger.log(step_idx, "eval_win_ratio_vs_best", win_ratio);
-            }
-
-            // Update best_net if we have enough evaluations AND average is good
-            if (rolling_win_ratios.size() >= ROLLING_EVAL_WINDOW) {
-                float avg_win_ratio = std::accumulate(rolling_win_ratios.begin(),
-                    rolling_win_ratios.end(), 0.0f) /
-                    rolling_win_ratios.size();
-
-                std::cout << "Rolling average vs best: " << std::fixed << std::setprecision(3)
-                    << avg_win_ratio << std::endl;
-
-                if (avg_win_ratio > CONSERVATIVE_WIN_RATIO) {
-                    std::cout << "Net is better than current best (avg=" << avg_win_ratio
-                        << " > " << CONSERVATIVE_WIN_RATIO << "), updating best model..." << std::endl;
-                    best_net.sync(net);
-                    best_idx++;
-
-                    // Clear rolling window after successful update
-                    rolling_win_ratios.clear();
-
-                    // Save best model
-                    std::ostringstream filename;
-                    filename << "best_" << std::setw(3) << std::setfill('0') << best_idx
-                        << "_" << std::setw(5) << std::setfill('0') << step_idx << ".pt";
-
-                    fs::path save_path = saves_path / filename.str();
-                    save_model(net, save_path.string());
-                    std::cout << "Saved best model to: " << save_path.string() << std::endl;
-                }
-            }
-
-            // Now evaluate against etalon model (for MCTS progression)
-            std::cout << "\nEvaluating against etalon model (MCTS=" << current_mcts_searches << ")..." << std::endl;
-
-            Connect4Net etalon_net_model = etalon_net.get_model();
-            float etalon_win_ratio = evaluate(current_net, etalon_net_model, EVALUATION_ROUNDS, device, current_mcts_searches);
-            rolling_etalon_ratios.push_back(etalon_win_ratio);
-
-            if (rolling_etalon_ratios.size() > ROLLING_EVAL_WINDOW) {
-                rolling_etalon_ratios.pop_front();
-            }
-
-            std::cout << "Win ratio vs etalon: " << std::fixed << std::setprecision(3)
-                << etalon_win_ratio << std::endl;
-
-            if (csv_logger.is_open()) {
-                csv_logger.log(step_idx, "eval_win_ratio_vs_etalon", etalon_win_ratio);
-                csv_logger.log(step_idx, "current_mcts_searches", static_cast<float>(current_mcts_searches));
-            }
-
-            // Check if we should increase MCTS
-            if (rolling_etalon_ratios.size() >= ROLLING_EVAL_WINDOW) {
-                float avg_etalon_ratio = std::accumulate(rolling_etalon_ratios.begin(),
-                    rolling_etalon_ratios.end(), 0.0f) /
-                    rolling_etalon_ratios.size();
-
-                std::cout << "Rolling average vs etalon: " << std::fixed << std::setprecision(3)
-                    << avg_etalon_ratio << std::endl;
-
-                // Check if we should increase MCTS
-                if (avg_etalon_ratio > MCTS_INCREASE_THRESHOLD &&
-                    current_mcts_idx < static_cast<int>(MCTS_SCHEDULE.size()) - 1) {
-
-                    std::cout << "\MCTS PROGRESSION TRIGGERED!" << std::endl;
-                    std::cout << "Average win ratio vs etalon (" << avg_etalon_ratio
-                        << ") > threshold (" << MCTS_INCREASE_THRESHOLD << ")" << std::endl;
-
-                    // Update etalon model to current best model
-                    std::cout << "Updating etalon model..." << std::endl;
-                    auto best_model = best_net.get_model();
-                    etalon_net.sync(best_model);
-                    etalon_idx = best_idx;
-
-                    // Clear rolling window
-                    rolling_etalon_ratios.clear();
-
-                    // Save etalon model
-                    std::ostringstream etalon_filename;
-                    etalon_filename << "etalon_" << std::setw(3) << std::setfill('0') << etalon_idx
-                        << "_" << std::setw(5) << std::setfill('0') << step_idx
-                        << "_mcts" << current_mcts_searches << ".pt";
-                    fs::path etalon_save_path = saves_path / etalon_filename.str();
-                    save_model(best_model, etalon_save_path.string());
-                    std::cout << "Saved etalon model to: " << etalon_save_path.string() << std::endl;
-
-                    // Clear replay buffer if configured
-                    if (CLEAR_BUFFER_ON_MCTS_INCREASE) {
-                        std::cout << "Clearing replay buffer for MCTS progression..." << std::endl;
-                        clear_replay_buffer(replay_buffer, WARM_START_RATIO);
-                    }
-                    else {
-                        std::cout << "Keeping replay buffer (CLEAR_BUFFER_ON_MCTS_INCREASE=false)" << std::endl;
-                    }
-
-                    // Increase MCTS
-                    current_mcts_idx++;
-                    current_mcts_searches = MCTS_SCHEDULE[current_mcts_idx];
-                    std::cout << "Increased MCTS searches to: " << current_mcts_searches
-                        << " (level " << current_mcts_idx + 1 << "/" << MCTS_SCHEDULE.size() << ")" << std::endl;
-
-                    // Log the MCTS increase
-                    if (csv_logger.is_open()) {
-                        csv_logger.log(step_idx, "mcts_increased", static_cast<float>(current_mcts_searches));
-                    }
-                }
-            }
-        }
-
         // Check for termination after evaluation
         if (terminate_requested) break;
 
-        // Save checkpoint every 1000 steps
+        // Save periodic checkpoint (every 1000 steps)
         if (step_idx % 1000 == 0) {
             std::ostringstream filename;
             filename << "checkpoint_" << std::setw(5) << std::setfill('0') << step_idx
-                << "_mcts" << current_mcts_searches << ".pt";
+                << ".pt";
             fs::path save_path = saves_path / filename.str();
             save_model(net, save_path.string());
-            std::cout << "Saved checkpoint to: " << save_path.string() << std::endl;
+            std::cout << "Saved periodic checkpoint to: " << save_path.string() << std::endl;
         }
     }
 
     // Handle graceful shutdown
     if (terminate_requested) {
-        save_and_exit(net, saves_path, step_idx, best_idx, current_mcts_idx);
+        save_and_exit(net, saves_path, step_idx);
         return 0;
     }
 

@@ -54,7 +54,8 @@ namespace Connect4 {
                 cur_player, nets[cur_player_int], device);
 
             auto [probs, _] = mcts.get_policy_value(state, tau);
-            game_history.emplace_back(state, cur_player, probs);
+            auto [h_probs, __] = mcts.get_policy_value(state, 1);
+            game_history.emplace_back(state, cur_player, h_probs);
 
             // Select action based on probabilities
             std::vector<float> probs_vec(probs.begin(), probs.end());
