@@ -29,16 +29,15 @@ namespace fs = std::filesystem;
 using namespace Connect4;
 
 // Hyperparameters - fixed for Connect4 AlphaZero
-constexpr int PLAY_EPISODES = 1;
-constexpr int MCTS_SEARCHES = 10;  // Starting MCTS searches
+constexpr int PLAY_EPISODES = 10;
+constexpr int MCTS_SEARCHES = 70;
 constexpr int MCTS_BATCH_SIZE = 64;
-constexpr size_t REPLAY_BUFFER_SIZE = 200000; // Critical fix: much larger buffer
-constexpr float LEARNING_RATE = 0.001f; // AlphaZero standard
+constexpr size_t REPLAY_BUFFER_SIZE = 200000;
+constexpr float LEARNING_RATE = 0.003f;
 constexpr int BATCH_SIZE = 256;
 constexpr int TRAIN_ROUNDS = 10;
-constexpr size_t MIN_REPLAY_TO_TRAIN = 2000;
+constexpr size_t MIN_REPLAY_TO_TRAIN = 20000;
 constexpr int STEPS_BEFORE_TAU_0 = 10;
-
 
 // Global flag for termination handling
 std::atomic<bool> terminate_requested(false);
@@ -251,34 +250,30 @@ int main(int argc, char** argv) {
     }
     net->to(device);
 
-    // Initialize ONLY etalon_net for curriculum purposes (no best_net)
-    TargetNet etalon_net(net);  // Etalon model starts as current model
-
     // Print network architecture
     std::cout << *net << std::endl;
 
-    // CORRECT AlphaZero optimizer: SGD with momentum + weight decay
-    torch::optim::SGDOptions sgd_opts(LEARNING_RATE);
+    torch::optim::SGDOptions sgd_opts = torch::optim::SGDOptions(LEARNING_RATE).momentum(0.9).weight_decay(1e-4);
     torch::optim::SGD optimizer(net->parameters(), sgd_opts);
 
     // Replay buffer
     ReplayBuffer replay_buffer;
 
-    // Training state - removed best_idx, kept etalon_idx for curriculum tracking
     int step_idx = 0;
 
-    std::deque<float> rolling_etalon_ratios;  // For tracking win rate against etalon
+    std::deque<float> loss_history;
+    int steps_since_last_improvement = 0;
+    float best_loss = std::numeric_limits<float>::max();
 
     if (!net_to_load.empty()) {
         try {
             // Parse step_idx and potentially mcts state from filename
             std::string filename = net_to_load;
-            size_t underscore1 = filename.find('_');
-            size_t underscore2 = filename.find('_', underscore1 + 1);
+            size_t underscore = filename.find('_');
             size_t dot = filename.find('.');
 
-            if (underscore1 != std::string::npos && underscore2 != std::string::npos && dot != std::string::npos) {
-                step_idx = std::stoi(filename.substr(underscore2 + 1, dot - underscore2 - 1));
+            if (underscore != std::string::npos && dot != std::string::npos) {
+                step_idx = std::stoi(filename.substr(underscore + 1, dot - 1));
                 std::cout << "Resuming from step " << step_idx << std::endl;
             }
         }
@@ -305,7 +300,6 @@ int main(int argc, char** argv) {
             mcts_stores.push_back(MCTS(1.0f));  // Player 0
             mcts_stores.push_back(MCTS(1.0f));  // Player 1
 
-            // CRITICAL CHANGE: Use current model (net) for self-play generation
             auto [game_result, steps] = play_game(
                 mcts_stores, &replay_buffer,
                 net, net,  // Both players use CURRENT model
@@ -351,12 +345,6 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // Update learning rate according to AlphaZero schedule
-        for (auto& group : optimizer.param_groups()) {
-            auto& options = static_cast<torch::optim::SGDOptions&>(group.options());
-            options.lr(LEARNING_RATE);
-        }
-
         // Training phase
         float sum_loss = 0.0f;
         float sum_value_loss = 0.0f;
@@ -375,7 +363,7 @@ int main(int argc, char** argv) {
             // Prioritized sampling based on data age (recent data has higher priority)
             size_t buffer_size = std::min(replay_buffer.size(), static_cast<size_t>(200000));
 
-            std::uniform_int_distribution<> dist(0, BATCH_SIZE - 1);
+            std::uniform_int_distribution<> dist(0, replay_buffer.size() - 1);
 
             for (int i = 0; i < BATCH_SIZE; ++i) {
                 size_t idx = dist(rng);
@@ -451,8 +439,8 @@ int main(int argc, char** argv) {
         // Check for termination after evaluation
         if (terminate_requested) break;
 
-        // Save periodic checkpoint (every 1000 steps)
-        if (step_idx % 1000 == 0) {
+        // Save periodic checkpoint
+        if (step_idx % 200 == 0) {
             std::ostringstream filename;
             filename << "checkpoint_" << std::setw(5) << std::setfill('0') << step_idx
                 << ".pt";
