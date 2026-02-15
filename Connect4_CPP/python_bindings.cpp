@@ -7,6 +7,7 @@
 #include "mcts.h"
 #include "model.h"
 #include "game_play.h"
+#include "alphabeta.cpp"
 
 namespace py = pybind11;
 using namespace Connect4;
@@ -152,6 +153,17 @@ private:
     MCTS mcts;
 };
 
+class PyMinimaxPlayer {
+public:
+    PyMinimaxPlayer(size_t tt_size_mb = 64) : minimaxPlayer(tt_size_mb) {}
+    int find_best_move(const PyGameState& state, int max_depth = 42) { 
+        return minimaxPlayer.find_best_move(state.get_state(), max_depth); 
+    }
+    void clear() { minimaxPlayer.clear(); }
+private:
+    MinimaxPlayer minimaxPlayer;
+};
+
 // Play game function wrapper
 std::tuple<std::vector<std::tuple<int, int, float>>, float, int, bool>
 py_play_game(PyMCTS& mcts1, PyMCTS& mcts2, PyNet& net1, PyNet& net2,
@@ -224,6 +236,13 @@ PYBIND11_MODULE(connect4_core, m) {
             py::arg("path"), py::arg("device") = "cpu")
         .def("forward", &PyNet::forward)
         .def("get_net", &PyNet::get_net);
+
+    py::class_<PyMinimaxPlayer>(m, "MinimaxPlayer")
+        .def(py::init<size_t>(),
+            py::arg("tt_size_mb") = 64)
+        .def("clear", &PyMinimaxPlayer::clear)
+        .def("find_best_move", &PyMinimaxPlayer::find_best_move,
+            py::arg("state"), py::arg("max_depth") = 42);
 
     m.def("play_game", &py_play_game,
         py::arg("mcts1"), py::arg("mcts2"), py::arg("net1"), py::arg("net2"),

@@ -187,28 +187,6 @@ namespace Connect4 {
         return field;
     }
 
-    bool GameLogic::fast_check_win(const GameState& state, Player player) {
-        uint64_t pieces = state.get_player_pieces(player);
-
-        // Horizontal check (7 bits between columns)
-        uint64_t m = pieces & (pieces >> 7);
-        if ((m & (m >> 14)) != 0) return true;
-
-        // Diagonal \ check (6 bits between rows)
-        m = pieces & (pieces >> 6);
-        if ((m & (m >> 12)) != 0) return true;
-
-        // Diagonal / check (8 bits between rows)
-        m = pieces & (pieces >> 8);
-        if ((m & (m >> 16)) != 0) return true;
-
-        // Vertical check (1 bit between rows)
-        m = pieces & (pieces >> 1);
-        if ((m & (m >> 2)) != 0) return true;
-
-        return false;
-    }
-
     void WinStats::update(const std::string& key, const Counts& counts) {
         auto& v = stats_[key];
         v.wins += counts.wins;
