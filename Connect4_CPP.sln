@@ -5,8 +5,6 @@ VisualStudioVersion = 17.14.36804.6
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Connect4_CPP", "Connect4_CPP\Connect4_CPP.vcxproj", "{48A83D9A-D1B6-4D67-B644-20F8B584ED17}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TicTacToe_CPP", "TicTacToe_CPP\TicTacToe_CPP.vcxproj", "{A7F829D2-25B9-4899-A71C-D1452E67D0A3}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -29,18 +27,6 @@ Global
 		{48A83D9A-D1B6-4D67-B644-20F8B584ED17}.ToPython|x64.Build.0 = ToPython|x64
 		{48A83D9A-D1B6-4D67-B644-20F8B584ED17}.ToPython|x86.ActiveCfg = ToPython|Win32
 		{48A83D9A-D1B6-4D67-B644-20F8B584ED17}.ToPython|x86.Build.0 = ToPython|Win32
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Debug|x64.ActiveCfg = Debug|x64
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Debug|x64.Build.0 = Debug|x64
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Debug|x86.ActiveCfg = Debug|Win32
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Debug|x86.Build.0 = Debug|Win32
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Release|x64.ActiveCfg = Release|x64
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Release|x64.Build.0 = Release|x64
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Release|x86.ActiveCfg = Release|Win32
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.Release|x86.Build.0 = Release|Win32
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.ToPython|x64.ActiveCfg = Release|x64
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.ToPython|x64.Build.0 = Release|x64
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.ToPython|x86.ActiveCfg = Release|Win32
-		{A7F829D2-25B9-4899-A71C-D1452E67D0A3}.ToPython|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -9,15 +9,14 @@ namespace Connect4 {
 
     std::pair<float, int> play_game(
         std::vector<MCTS>& mcts_stores,
-        ReplayBuffer* replay_buffer,
+        std::vector<ReplayBuffer::value_type>* local_buffer,
         Connect4Net& net1,
         Connect4Net& net2,
         int steps_before_tau_0,
         int mcts_searches,
         int mcts_batch_size,
         std::optional<bool> net1_plays_first,
-        const torch::Device& device,
-        size_t REPLAY_BUFFER_SIZE) {
+        const torch::Device& device) {
 
         GameState state = GameLogic::INITIAL_STATE;
         std::vector<Connect4Net> nets = { net1, net2 };
@@ -81,7 +80,6 @@ namespace Connect4 {
                 state = new_state;
                 break;
             }
-
             state = new_state;
             cur_player_int = 1 - cur_player_int;
             cur_player = static_cast<Player>(cur_player_int);
@@ -100,17 +98,49 @@ namespace Connect4 {
         }
 
         // Update replay buffer if provided
-        if (replay_buffer != nullptr) {
+        if (local_buffer) {
             float current_result = result;
             for (auto it = game_history.rbegin(); it != game_history.rend(); ++it) {
                 const auto& [s, p, pr] = *it;
-                replay_buffer->push_back(std::make_tuple(s, p, pr, current_result));
-                current_result = -current_result;
+                local_buffer->emplace_back(std::make_tuple(s, p, pr, current_result));
 
-                // Maintain buffer size limit
-                if (replay_buffer->size() > REPLAY_BUFFER_SIZE) {
-                    replay_buffer->pop_front(); // Remove oldest entry
+                GameState flipped = s;
+                uint64_t new_black = 0, new_white = 0;
+
+                // Simple bitboard flip (row by row)
+                for (int row = 0; row < 6; ++row) {
+                    for (int col = 0; col < 7; ++col) {
+                        int orig_pos = row * 7 + col;
+                        int flip_pos = row * 7 + (6 - col);
+
+                        if (s.black_pieces & (1ULL << orig_pos))
+                            new_black |= (1ULL << flip_pos);
+                        if (s.white_pieces & (1ULL << orig_pos))
+                            new_white |= (1ULL << flip_pos);
+                    }
                 }
+
+                flipped.black_pieces = new_black;
+                flipped.white_pieces = new_white;
+                flipped.occupied = new_white | new_black;
+
+                for (int col = 0; col < 7; ++col) {
+                    int height = 0;
+                    for (int row = 0; row < 6; ++row) {
+                        int pos = row * 7 + col;
+                        if (flipped.occupied & (1ULL << pos))
+                            height = row + 1;
+                    }
+                    flipped.heights[col] = height;
+                }
+
+                // Flip policy
+                std::array<float, 7> flipped_probs;
+                for (int i = 0; i < 7; ++i)
+                    flipped_probs[i] = pr[6 - i];
+
+                local_buffer->emplace_back(std::make_tuple(flipped, p, flipped_probs, current_result));
+                current_result = -current_result;
             }
         }
 

@@ -1,5 +1,5 @@
 #pragma once
-#include <unordered_map>
+#include <tsl/robin_map.h>
 #include <vector>
 #include <array>
 #include <cmath>
@@ -8,9 +8,11 @@
 #include <queue>
 #include <memory>
 #include <torch/torch.h>
+#include <future>
 
 #include "connect4_game.h"
 #include "model.h"
+#include "neural_worker.h"
 
 namespace Connect4 {
 
@@ -30,6 +32,8 @@ namespace Connect4 {
     class MCTS {
     public:
         explicit MCTS(float c_puct = 1.0f);
+        MCTS(const MCTS& other); // Proper copy constructor
+        bool use_noise = true;
 
         void clear();
         size_t size() const;
@@ -47,16 +51,21 @@ namespace Connect4 {
 
         std::pair<std::array<float, GAME_COLS>, std::array<float, GAME_COLS>>
             get_policy_value(const GameState& state, float tau = 1.0f) const;
+        NeuralWorker* neural_worker_ = nullptr;
+        void set_neural_worker(NeuralWorker* worker) {
+            neural_worker_ = worker;
+        }
 
     private:
         float c_puct_;
-        std::unordered_map<uint64_t, MCTSNode> tree_;
+        tsl::robin_map<uint64_t, MCTSNode> tree_;
 
         // Random number generation for Dirichlet noise
         std::mt19937 rng_;
         std::gamma_distribution<float> dirichlet_dist_;
 
         std::array<float, GAME_COLS> generate_dirichlet_noise();
+        std::array<float, GAME_COLS> dirichlet_noise;
     };
 
 } // namespace Connect4

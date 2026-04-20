@@ -16,8 +16,7 @@ namespace Connect4 {
 
         conv2 = torch::nn::Sequential(
             torch::nn::Conv2d(torch::nn::Conv2dOptions(in_channels, in_channels, 3).padding(1)),
-            torch::nn::BatchNorm2d(in_channels),
-            torch::nn::LeakyReLU()
+            torch::nn::BatchNorm2d(in_channels)
         );
 
         register_module("conv1", conv1);
@@ -28,7 +27,8 @@ namespace Connect4 {
         torch::Tensor identity = x;
         x = conv1->forward(x);
         x = conv2->forward(x);
-        return x + identity;
+        x = x + identity;
+        return torch::leaky_relu(x);
     }
 
     Connect4NetImpl::Connect4NetImpl() {
@@ -48,8 +48,8 @@ namespace Connect4 {
 
         // Value head
         conv_val = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(NUM_FILTERS, 1, 1)),
-            torch::nn::BatchNorm2d(1),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(NUM_FILTERS, 32, 1)),
+            torch::nn::BatchNorm2d(32),
             torch::nn::LeakyReLU(),
             torch::nn::Flatten()
         );
@@ -81,8 +81,9 @@ namespace Connect4 {
             // Get value head size
             torch::Tensor dummy_val = conv_val->forward(dummy.clone());
             int val_size = dummy_val.size(1);
-            val_linear1 = torch::nn::Linear(val_size, 20);
-            val_linear2 = torch::nn::Linear(20, 1);
+            val_linear1 = torch::nn::Linear(val_size, 128);
+            val_linear2 = torch::nn::Linear(128, 1);
+            //val_linear3 = torch::nn::Linear(256, 1);
 
             // Get policy head size
             torch::Tensor dummy_policy = conv_policy->forward(dummy.clone());
@@ -93,6 +94,7 @@ namespace Connect4 {
         // Register the linear layers
         register_module("val_linear1", val_linear1);
         register_module("val_linear2", val_linear2);
+        //register_module("val_linear3", val_linear3);
         register_module("policy_linear", policy_linear);
     }
 
@@ -107,6 +109,7 @@ namespace Connect4 {
         // Value head
         torch::Tensor val = conv_val->forward(x);
         val = torch::leaky_relu(val_linear1->forward(val));
+        //val = torch::leaky_relu(val_linear2->forward(val));
         val = torch::tanh(val_linear2->forward(val));
 
         // Policy head
@@ -119,66 +122,44 @@ namespace Connect4 {
     torch::Tensor state_lists_to_batch(const std::vector<GameState>& states,
         const std::vector<Player>& who_moves,
         const torch::Device& device) {
+
         size_t batch_size = states.size();
 
-        // Create tensor on the correct device
+        // Pre-allocate on CPU first (faster than direct CUDA allocation)
         torch::Tensor batch = torch::zeros({ static_cast<int64_t>(batch_size), 2, GAME_ROWS, GAME_COLS },
-            torch::dtype(torch::kFloat32).device(device));
-
-        // If on CUDA, ensure we're operating on CPU copies first
-        torch::Tensor batch_cpu = batch.is_cuda() ? batch.cpu() : batch;
-        auto batch_accessor = batch_cpu.accessor<float, 4>();
+            torch::dtype(torch::kFloat32).device(torch::kCPU));
+        auto batch_accessor = batch.accessor<float, 4>();
 
         for (size_t idx = 0; idx < batch_size; ++idx) {
             const auto& state = states[idx];
             Player who_move = who_moves[idx];
 
-            // Fill the tensor based on game state
-            for (int col = 0; col < GAME_COLS; ++col) {
-                // ADD BOUNDS CHECKING HERE - this is the critical fix!
-                int max_height = std::min(static_cast<int>(state.heights[col]), GAME_ROWS);
+            // Determine which channel is "us" vs "them"
+            int our_channel = (who_move == Player::BLACK) ? 0 : 1;
+            int their_channel = 1 - our_channel;
 
-                for (int row = 0; row < max_height; ++row) {
-                    // Calculate tensor row (flip vertically for display)
-                    int tensor_row = GAME_ROWS - 1 - row;
+            // Direct bit iteration (no nested row/col loops!)
+            uint64_t our_pieces = (who_move == Player::BLACK) ? state.black_pieces : state.white_pieces;
+            uint64_t their_pieces = (who_move == Player::BLACK) ? state.white_pieces : state.black_pieces;
 
-                    // ADD BOUNDS CHECKING for tensor_row
-                    if (tensor_row < 0 || tensor_row >= GAME_ROWS) {
-                        std::cerr << "Warning: Invalid tensor_row " << tensor_row
-                            << " for row " << row << ", col " << col
-                            << ", height " << state.heights[col] << std::endl;
-                        continue;
-                    }
+            // Unroll the 42 positions directly
+            for (int pos = 0; pos < 42; ++pos) {
+                int row = pos / 7;
+                int col = pos % 7;
+                int tensor_row = GAME_ROWS - 1 - row;  // Flip vertically
 
-                    int pos = row * GAME_COLS + col;
-                    uint64_t bit = 1ULL << pos;
-
-                    bool is_black = (state.black_pieces & bit) != 0;
-                    bool is_white = (state.white_pieces & bit) != 0;
-
-                    if (is_black) {
-                        if (who_move == Player::BLACK) {
-                            batch_accessor[idx][0][tensor_row][col] = 1.0f;
-                        }
-                        else {
-                            batch_accessor[idx][1][tensor_row][col] = 1.0f;
-                        }
-                    }
-                    else if (is_white) {
-                        if (who_move == Player::WHITE) {
-                            batch_accessor[idx][0][tensor_row][col] = 1.0f;
-                        }
-                        else {
-                            batch_accessor[idx][1][tensor_row][col] = 1.0f;
-                        }
-                    }
+                if (our_pieces & (1ULL << pos)) {
+                    batch_accessor[idx][our_channel][tensor_row][col] = 1.0f;
+                }
+                if (their_pieces & (1ULL << pos)) {
+                    batch_accessor[idx][their_channel][tensor_row][col] = 1.0f;
                 }
             }
         }
 
-        // If we were working on CPU copy for CUDA tensor, copy back
-        if (batch.is_cuda()) {
-            batch.copy_(batch_cpu);
+        // Copy to GPU only once at the end (if needed)
+        if (device.is_cuda()) {
+            batch = batch.to(device);
         }
 
         return batch;
