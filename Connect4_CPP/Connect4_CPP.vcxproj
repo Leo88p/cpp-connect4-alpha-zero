@@ -166,14 +166,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions);USE_CUDA;</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>D:\libtorch\include;D:\libtorch\include\torch\csrc\api\include;D:\robin-map-master\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>D:\libtorch\include;D:\libtorch\include\torch\csrc\api\include;D:\robin-map-master\include;D:\libtorch\include\c10;$(CUDA_PATH)\include;</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>D:\libtorch\lib;</AdditionalLibraryDirectories>
-      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies);torch_cuda.lib;c10_cuda.lib;torch_cpu.lib;c10.lib;caffe2_nvrtc.lib;</AdditionalDependencies>
+      <AdditionalLibraryDirectories>D:\libtorch\lib;$(CUDA_PATH)\lib\x64;</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies);torch_cuda.lib;c10_cuda.lib;torch_cpu.lib;c10.lib;caffe2_nvrtc.lib;cudart.lib;</AdditionalDependencies>
       <AdditionalOptions>/INCLUDE:?warp_size@cuda@at@@YAHXZ %(AdditionalOptions)</AdditionalOptions>
     </Link>
     <PostBuildEvent>

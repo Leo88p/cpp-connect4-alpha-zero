@@ -39,7 +39,8 @@ namespace Connect4 {
         size_t size() const;
 
         std::tuple<float, GameState, Player, std::vector<GameState>, std::vector<int>>
-            find_leaf(const GameState& root_state, Player player);
+            find_leaf(const GameState& root_state, Player player,
+                std::vector<std::pair<uint64_t, int>>* virtual_loss_path);
 
         bool is_leaf(const GameState& state) const;
 

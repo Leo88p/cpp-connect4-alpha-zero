@@ -38,6 +38,11 @@ namespace Connect4 {
         ResidualBlock block3 = nullptr;
         ResidualBlock block4 = nullptr;
         ResidualBlock block5 = nullptr;
+        ResidualBlock block6 = nullptr;
+        ResidualBlock block7 = nullptr;
+        ResidualBlock block8 = nullptr;
+        ResidualBlock block9 = nullptr;
+        ResidualBlock block10 = nullptr;
 
         torch::nn::Sequential conv_val = nullptr;
         torch::nn::Linear val_linear1 = nullptr;
