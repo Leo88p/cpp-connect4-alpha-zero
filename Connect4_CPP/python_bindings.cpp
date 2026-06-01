@@ -42,8 +42,8 @@ private:
 class PyNet {
 public:
     PyNet() : net(std::make_shared<Connect4NetImpl>()) {}
-    PyNet(const std::string& path, const std::string& device_str = "cpu")
-        : net(std::make_shared<Connect4NetImpl>()) {
+    PyNet(const std::string& path, const int blocks, const std::string& device_str = "cpu")
+        : net(std::make_shared<Connect4NetImpl>(blocks)) {
         load(path, device_str);
         net->eval();
         torch::NoGradGuard no_grad;
@@ -253,8 +253,8 @@ PYBIND11_MODULE(connect4_core, m) {
 
     py::class_<PyNet>(m, "Net")
         .def(py::init<>())
-        .def(py::init<const std::string&, const std::string&>(),
-            py::arg("path"), py::arg("device") = "cpu")
+        .def(py::init<const std::string&, const int, const std::string&>(),
+            py::arg("path"), py::arg("blocks"), py::arg("device") = "cpu")
         .def("load", &PyNet::load,
             py::arg("path"), py::arg("device") = "cpu")
         .def("forward", &PyNet::forward)

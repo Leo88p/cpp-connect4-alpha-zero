@@ -31,7 +31,7 @@ namespace Connect4 {
         return torch::leaky_relu(x);
     }
 
-    Connect4NetImpl::Connect4NetImpl() {
+    Connect4NetImpl::Connect4NetImpl(int num_blocks) {
         // Input shape: (2, 6, 7)
         conv_in = torch::nn::Sequential(
             torch::nn::Conv2d(torch::nn::Conv2dOptions(2, NUM_FILTERS, 3).padding(1)),
@@ -40,16 +40,9 @@ namespace Connect4 {
         );
 
         // Initialize residual blocks
-        block1 = ResidualBlock(NUM_FILTERS);
-        block2 = ResidualBlock(NUM_FILTERS);
-        block3 = ResidualBlock(NUM_FILTERS);
-        block4 = ResidualBlock(NUM_FILTERS);
-        block5 = ResidualBlock(NUM_FILTERS);
-        block6 = ResidualBlock(NUM_FILTERS);
-        block7 = ResidualBlock(NUM_FILTERS);
-        block8 = ResidualBlock(NUM_FILTERS);
-        block9 = ResidualBlock(NUM_FILTERS);
-        block10 = ResidualBlock(NUM_FILTERS);
+        for (int i = 0; i < num_blocks; i++) {
+            residual_blocks->push_back(ResidualBlock(NUM_FILTERS));
+        } 
 
         // Value head
         conv_val = torch::nn::Sequential(
@@ -69,16 +62,7 @@ namespace Connect4 {
 
         // Register all modules first
         register_module("conv_in", conv_in);
-        register_module("block1", block1);
-        register_module("block2", block2);
-        register_module("block3", block3);
-        register_module("block4", block4);
-        register_module("block5", block5);
-        register_module("block6", block6);
-        register_module("block7", block7);
-        register_module("block8", block8);
-        register_module("block9", block9);
-        register_module("block10", block10);
+        register_module("residual_blocks", residual_blocks);
         register_module("conv_val", conv_val);
         register_module("conv_policy", conv_policy);
 
@@ -110,16 +94,11 @@ namespace Connect4 {
 
     std::pair<torch::Tensor, torch::Tensor> Connect4NetImpl::forward(torch::Tensor x) {
         x = conv_in->forward(x);
-        x = block1->forward(x);
-        x = block2->forward(x);
-        x = block3->forward(x);
-        x = block4->forward(x);
-        x = block5->forward(x);
-        x = block6->forward(x);
-        x = block7->forward(x);
-        x = block8->forward(x);
-        x = block9->forward(x);
-        x = block10->forward(x);
+        
+        for (size_t i = 0; i < residual_blocks->size(); ++i) {
+            auto block = residual_blocks[i]->as<ResidualBlockImpl>();
+            x = block->forward(x);
+        } 
 
         // Value head
         torch::Tensor val = conv_val->forward(x);

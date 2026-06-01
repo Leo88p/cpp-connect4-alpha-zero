@@ -31,20 +31,21 @@ namespace fs = std::filesystem;
 using namespace Connect4;
 
 // Hyperparameters - fixed for Connect4 AlphaZero
-int PLAY_EPISODES = 1000;
-int PARALLEL_GAMES = 64;
-int MCTS_SEARCHES = 10;
+int PLAY_EPISODES = 2048;
+int PARALLEL_GAMES = 256;
+int MCTS_SEARCHES = 32;
 int MCTS_BATCH_SIZE = 64;
 constexpr size_t REPLAY_BUFFER_SIZE = 1000000;
-float LEARNING_RATE = 0.2f;
+float LEARNING_RATE = 0.02f;
 constexpr float LEARNING_RATE_ADJUSTED_1 = 0.02f;
 constexpr float LEARNING_RATE_ADJUSTED_2 = 0.002f;
 constexpr int ADJUSTED_IDX_1 = 20;
 constexpr int ADJUSTED_IDX_2 = 100;
 constexpr int BATCH_SIZE = 2048;
-constexpr int TRAIN_ROUNDS = 100;
+constexpr int TRAIN_ROUNDS = 30;
 constexpr size_t MIN_REPLAY_TO_TRAIN = 10;
 constexpr int STEPS_BEFORE_TAU_0 = 10;
+constexpr int NUM_BLOCKS = 10;
 //constexpr int EVALUATION_ROUNDS = 500;
 //constexpr float WIN_RATIO = 0.52f;
 
@@ -184,8 +185,9 @@ void clear_replay_buffer(ReplayBuffer& buffer, float keep_ratio = 0.0f) {
 
 int main(int argc, char** argv) {
 
+    std::mt19937_64 rng(42);  // Fixed seed for reproducibility, or use random_device
+    //Connect4::ZobristHash::init(rng);
     // In main(), create ONCE:
-    ThreadPool pool(PARALLEL_GAMES);  // Match your 12 cores
     torch::set_num_threads(1);        // Limit intra-op parallelism per forward
     torch::set_num_interop_threads(1); // Limit inter-op parallelism
 
@@ -226,6 +228,7 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
+    ThreadPool pool(PARALLEL_GAMES);  // Match your 12 cores
 
     if (run_name.empty()) {
         std::cerr << "Error: --name argument is required" << std::endl;
@@ -250,7 +253,7 @@ int main(int argc, char** argv) {
     CSVLogger csv_logger((logs_path / "metrics.csv").string());
 
     // Initialize network
-    Connect4Net net = std::make_shared<Connect4NetImpl>();
+    Connect4Net net = std::make_shared<Connect4NetImpl>(NUM_BLOCKS);
     net->to(device);  // Ensure network is on the correct device from the start
 
     if (!net_to_load.empty()) {
@@ -313,7 +316,7 @@ int main(int argc, char** argv) {
     }
 
     SimpleTracker tracker(csv_logger, 1);
-    std::mt19937 rng(std::random_device{}());
+    //std::mt19937 rng(std::random_device{}());
 
     // Training loop with termination handling
     while (!terminate_requested) {
@@ -324,11 +327,10 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, 256);
+        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, PARALLEL_GAMES);
         net->eval(); 
         {
             torch::NoGradGuard no_grad;
-            std::vector<Connect4Net> net_copies;
             std::vector<std::vector<MCTS>> all_mcts(PARALLEL_GAMES,
                 std::vector<MCTS>(2, MCTS(1.0f)));
 
@@ -336,27 +338,6 @@ int main(int argc, char** argv) {
                 for (auto& mcts : game_mcts) {
                     mcts.set_neural_worker(neural_worker.get());
                 }
-            }
-            for (int i = 0; i < PARALLEL_GAMES; ++i) {
-                Connect4Net copy = std::make_shared<Connect4NetImpl>();
-                copy->to(device);
-                copy->eval();  // или train(), в зависимости от фазы
-
-                // Копируем параметры (веса)
-                torch::NoGradGuard no_grad;
-                auto params = net->parameters();
-                auto copy_params = copy->parameters();
-                for (size_t i = 0; i < params.size(); ++i) {
-                    copy_params[i].copy_(params[i]);
-                }
-
-                // Копируем буферы (например, для BatchNorm — running_mean, running_var)
-                auto buffers = net->buffers();
-                auto copy_buffers = copy->buffers();
-                for (size_t i = 0; i < buffers.size(); ++i) {
-                    copy_buffers[i].copy_(buffers[i]);
-                }
-                net_copies.push_back(copy);
             }
 
             // Мьютекс для защиты общего replay_buffer
@@ -377,7 +358,7 @@ int main(int argc, char** argv) {
                             // Запускаем игру, передавая локальный буфер
                             auto [game_result, steps] = play_game(
                                 all_mcts[i], &local_buffers[i],
-                                net_copies[i], net_copies[i],
+                                net, net,
                                 STEPS_BEFORE_TAU_0, MCTS_SEARCHES, MCTS_BATCH_SIZE,
                                 std::nullopt, device
                             );
