@@ -95,9 +95,6 @@ namespace Connect4 {
         static GameState from_list_representation(const std::vector<std::vector<int>>& field_lists);
 
         static std::vector<std::vector<int>> to_list_representation(const GameState& state);
-
-        // Performance optimization: cache-friendly win checking using bit patterns
-        static bool fast_check_win(const GameState& state, Player player);
     };
 
     // Statistics tracking (equivalent to update_counts in Python)

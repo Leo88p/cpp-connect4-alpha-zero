@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <csignal>
 #include <atomic>
+#include <future>
+#include <mutex>
 
 #include <torch/torch.h>
 #include <torch/script.h>
@@ -29,25 +31,73 @@ namespace fs = std::filesystem;
 using namespace Connect4;
 
 // Hyperparameters - fixed for Connect4 AlphaZero
-constexpr int PLAY_EPISODES = 10;
-constexpr int MCTS_SEARCHES = 400;  // Starting MCTS searches
-constexpr int EVALUATE_MCTS_SEARCHES = 10;
-constexpr int MCTS_BATCH_SIZE = 64;
-constexpr size_t REPLAY_BUFFER_SIZE = 500000; // Critical fix: much larger buffer
-constexpr float LEARNING_RATE = 0.001f; // AlphaZero standard
-constexpr float MOMENTUM = 0.9f;
-constexpr float WEIGHT_DECAY = 1e-4f; // L2 regularization
-constexpr int BATCH_SIZE = 256;
-constexpr int TRAIN_ROUNDS = 2;
-constexpr size_t MIN_REPLAY_TO_TRAIN = 2000;
-constexpr float WIN_RATIO = 0.55f; // More conservative threshold
-constexpr int EVALUATE_EVERY_STEP = 100;
-constexpr int EVALUATION_ROUNDS = 200;
+int PLAY_EPISODES = 2048;
+int PARALLEL_GAMES = 256;
+int MCTS_SEARCHES = 32;
+int MCTS_BATCH_SIZE = 64;
+constexpr size_t REPLAY_BUFFER_SIZE = 1000000;
+float LEARNING_RATE = 0.02f;
+constexpr float LEARNING_RATE_ADJUSTED_1 = 0.02f;
+constexpr float LEARNING_RATE_ADJUSTED_2 = 0.002f;
+constexpr int ADJUSTED_IDX_1 = 20;
+constexpr int ADJUSTED_IDX_2 = 100;
+constexpr int BATCH_SIZE = 2048;
+constexpr int TRAIN_ROUNDS = 30;
+constexpr size_t MIN_REPLAY_TO_TRAIN = 10;
 constexpr int STEPS_BEFORE_TAU_0 = 10;
+constexpr int NUM_BLOCKS = 10;
+//constexpr int EVALUATION_ROUNDS = 500;
+//constexpr float WIN_RATIO = 0.52f;
 
 // Global flag for termination handling
 std::atomic<bool> terminate_requested(false);
 std::atomic<bool> saving_checkpoint(false);
+
+// Add this class (minimal thread pool):
+class ThreadPool {
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queue_mutex;
+    std::condition_variable condition;
+    bool stop = false;
+
+public:
+    ThreadPool(size_t threads) {
+        for (size_t i = 0; i < threads; ++i)
+            workers.emplace_back([this] {
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(queue_mutex);
+                    condition.wait(lock, [this] { return stop || !tasks.empty(); });
+                    if (stop && tasks.empty()) return;
+                    task = std::move(tasks.front());
+                    tasks.pop();
+                }
+                task();
+            }
+                });
+    }
+
+    template<class F>
+    auto enqueue(F&& f) -> std::future<decltype(f())> {
+        using return_type = decltype(f());
+        auto task = std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            tasks.emplace([task]() { (*task)(); });
+        }
+        condition.notify_one();
+        return res;
+    }
+
+    ~ThreadPool() {
+        { std::unique_lock<std::mutex> lock(queue_mutex); stop = true; }
+        condition.notify_all();
+        for (std::thread& worker : workers) worker.join();
+    }
+};
 
 // Signal handler for graceful shutdown
 void signal_handler(int signal) {
@@ -61,75 +111,6 @@ void signal_handler(int signal) {
 
         terminate_requested = true;
     }
-}
-
-class TargetNet {
-public:
-    explicit TargetNet(Connect4Net& net) : model_(std::make_shared<Connect4NetImpl>()) {
-        sync(net);
-    }
-
-    void sync(Connect4Net& net) {
-        torch::Device device = net->parameters().empty() ? torch::kCPU : net->parameters().front().device();
-        model_->to(device);
-        net->to(device);
-
-        auto target_params = model_->named_parameters();
-        auto source_params = net->named_parameters();
-
-        {
-            torch::NoGradGuard no_grad;
-            for (const auto& param_pair : source_params) {
-                const std::string& name = param_pair.key();
-                const torch::Tensor& source_param = param_pair.value();
-
-                if (target_params.contains(name)) {
-                    torch::Tensor target_param = target_params[name];
-
-                    // Ensure shapes match
-                    if (target_param.sizes() != source_param.sizes()) {
-                        std::cerr << "Warning: Parameter shapes don't match for '" << name << "'" << std::endl;
-                        continue;
-                    }
-
-                    target_param.copy_(source_param.detach());
-                }
-            }
-        }
-    }
-
-    Connect4Net get_model() const {
-        return model_;
-    }
-
-private:
-    Connect4Net model_;
-};
-
-float evaluate(Connect4Net& net1, Connect4Net& net2, int rounds, const torch::Device& device, int mcts_searches) {
-    int n1_win = 0, n2_win = 0;
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
-    for (int r_idx = 0; r_idx < rounds; ++r_idx) {
-        std::vector<MCTS> mcts_stores;
-        mcts_stores.push_back(MCTS());  // Player 1's MCTS store
-        mcts_stores.push_back(MCTS());  // Player 2's MCTS store
-        auto [result, _] = play_game(
-            mcts_stores, nullptr, net1, net2,
-            0, mcts_searches, MCTS_BATCH_SIZE, std::nullopt, device, REPLAY_BUFFER_SIZE
-        );
-
-        if (result < -0.5f) {
-            n2_win++;
-        }
-        else if (result > 0.5f) {
-            n1_win++;
-        }
-    }
-
-    return static_cast<float>(n1_win) / (n1_win + n2_win + 1e-8f);
 }
 
 void print_help() {
@@ -168,7 +149,7 @@ void load_model(Connect4Net& net, const std::string& path, const torch::Device& 
 }
 
 // Function to save final checkpoint and exit
-void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx, int best_idx, int current_mcts_idx) {
+void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx) {
     std::cout << "\nSaving final checkpoint before exit..." << std::endl;
 
     // Save final checkpoint
@@ -185,8 +166,6 @@ void save_and_exit(Connect4Net& net, const fs::path& saves_path, int step_idx, i
     std::ofstream progress_file(progress_path);
     if (progress_file.is_open()) {
         progress_file << "step_idx=" << step_idx << std::endl;
-        progress_file << "best_idx=" << best_idx << std::endl;
-        progress_file << "current_mcts_idx=" << current_mcts_idx << std::endl;
         progress_file << "timestamp=" << std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()) << std::endl;
         progress_file.close();
         std::cout << "Training progress saved to: " << progress_path.string() << std::endl;
@@ -205,6 +184,13 @@ void clear_replay_buffer(ReplayBuffer& buffer, float keep_ratio = 0.0f) {
 }
 
 int main(int argc, char** argv) {
+
+    std::mt19937_64 rng(42);  // Fixed seed for reproducibility, or use random_device
+    //Connect4::ZobristHash::init(rng);
+    // In main(), create ONCE:
+    torch::set_num_threads(1);        // Limit intra-op parallelism per forward
+    torch::set_num_interop_threads(1); // Limit inter-op parallelism
+
     // Setup signal handlers for graceful shutdown
     std::signal(SIGINT, signal_handler);  // Ctrl+C
     std::signal(SIGTERM, signal_handler); // Termination request
@@ -225,11 +211,24 @@ int main(int argc, char** argv) {
         else if (arg == "--net") {
             if (i + 1 < argc) net_to_load = argv[++i];
         }
+        else if (arg == "--mcts") {
+            if (i + 1 < argc) MCTS_SEARCHES = std::stoi(argv[++i]);
+        }
+        else if (arg == "--batch") {
+            if (i + 1 < argc) MCTS_BATCH_SIZE = std::stoi(argv[++i]);
+        }
+        else if (arg == "--games") {
+            if (i + 1 < argc) PLAY_EPISODES = std::stoi(argv[++i]);
+        }
+        else if (arg == "--parallel") {
+            if (i + 1 < argc) PARALLEL_GAMES = std::stoi(argv[++i]);
+        }
         else if (arg == "-h" || arg == "--help") {
             print_help();
             return 0;
         }
     }
+    ThreadPool pool(PARALLEL_GAMES);  // Match your 12 cores
 
     if (run_name.empty()) {
         std::cerr << "Error: --name argument is required" << std::endl;
@@ -239,6 +238,7 @@ int main(int argc, char** argv) {
 
     std::cout << "Starting training with name: " << run_name << std::endl;
     std::cout << "Device: " << device_str << std::endl;
+
     if (!net_to_load.empty()) {
         std::cout << "Loading network from: " << net_to_load << std::endl;
     }
@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
     CSVLogger csv_logger((logs_path / "metrics.csv").string());
 
     // Initialize network
-    Connect4Net net = std::make_shared<Connect4NetImpl>();
+    Connect4Net net = std::make_shared<Connect4NetImpl>(NUM_BLOCKS);
     net->to(device);  // Ensure network is on the correct device from the start
 
     if (!net_to_load.empty()) {
@@ -283,40 +283,31 @@ int main(int argc, char** argv) {
     }
     net->to(device);
 
-    // Initialize best_net and etalon_net
-    TargetNet best_net(net);
-    TargetNet etalon_net(net);  // Etalon model starts as current model
-
     // Print network architecture
     std::cout << *net << std::endl;
 
-    // CORRECT AlphaZero optimizer: SGD with momentum + weight decay
-    torch::optim::SGDOptions sgd_opts(LEARNING_RATE);
-    sgd_opts.momentum(MOMENTUM).weight_decay(WEIGHT_DECAY);
+    torch::optim::SGDOptions sgd_opts = torch::optim::SGDOptions(LEARNING_RATE).momentum(0.9).weight_decay(1e-4);
     torch::optim::SGD optimizer(net->parameters(), sgd_opts);
 
     // Replay buffer
     ReplayBuffer replay_buffer;
 
-    // Training state
     int step_idx = 0;
-    int best_idx = 0;
 
-    std::deque<float> rolling_win_ratios;
-    std::deque<float> rolling_etalon_ratios;  // For tracking win rate against etalon
+    std::deque<float> loss_history;
+    int steps_since_last_improvement = 0;
+    float best_loss = std::numeric_limits<float>::max();
 
     if (!net_to_load.empty()) {
         try {
-            // Parse step_idx, best_idx, and potentially mcts state from filename
+            // Parse step_idx and potentially mcts state from filename
             std::string filename = net_to_load;
-            size_t underscore1 = filename.find('_');
-            size_t underscore2 = filename.find('_', underscore1 + 1);
+            size_t underscore = filename.find('_');
             size_t dot = filename.find('.');
 
-            if (underscore1 != std::string::npos && underscore2 != std::string::npos && dot != std::string::npos) {
-                best_idx = std::stoi(filename.substr(underscore1 + 1, underscore2 - underscore1 - 1));
-                step_idx = std::stoi(filename.substr(underscore2 + 1, dot - underscore2 - 1));
-                std::cout << "Resuming from step " << step_idx << ", best index " << best_idx << std::endl;
+            if (underscore != std::string::npos && dot != std::string::npos) {
+                step_idx = std::stoi(filename.substr(underscore + 1, dot - 1));
+                std::cout << "Resuming from step " << step_idx << std::endl;
             }
         }
         catch (const std::exception& e) {
@@ -324,8 +315,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    SimpleTracker tracker(csv_logger, 10);
-    std::mt19937 rng(std::random_device{}());
+    SimpleTracker tracker(csv_logger, 1);
+    //std::mt19937 rng(std::random_device{}());
 
     // Training loop with termination handling
     while (!terminate_requested) {
@@ -336,27 +327,70 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        // Play episodes using current MCTS searches
-        for (int episode_idx = 0; episode_idx < PLAY_EPISODES && !terminate_requested; ++episode_idx) {
-            std::vector<MCTS> mcts_stores;
-            mcts_stores.push_back(MCTS(1.0f));  // Player 0
-            mcts_stores.push_back(MCTS(1.0f));  // Player 1
+        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, PARALLEL_GAMES);
+        net->eval(); 
+        {
+            torch::NoGradGuard no_grad;
+            std::vector<std::vector<MCTS>> all_mcts(PARALLEL_GAMES,
+                std::vector<MCTS>(2, MCTS(1.0f)));
 
-            // Use best_net for self-play generation
-            auto best_model = best_net.get_model();
+            for (auto& game_mcts : all_mcts) {
+                for (auto& mcts : game_mcts) {
+                    mcts.set_neural_worker(neural_worker.get());
+                }
+            }
 
-            auto [game_result, steps] = play_game(
-                mcts_stores, &replay_buffer,
-                best_model, best_model,
-                STEPS_BEFORE_TAU_0, MCTS_SEARCHES, MCTS_BATCH_SIZE,
-                std::nullopt, device, REPLAY_BUFFER_SIZE
-            );
+            // Мьютекс для защиты общего replay_buffer
+            std::mutex replay_mutex;
 
-            // Calculate leaves created DURING THIS GAME
-            size_t new_nodes = mcts_stores[0].size();
-            total_leaves += static_cast<int>(new_nodes);
-            game_steps += steps;
+            for (int episode_start = 0; episode_start < PLAY_EPISODES && !terminate_requested; episode_start += PARALLEL_GAMES) {
+                int batch_games = std::min(PARALLEL_GAMES, PLAY_EPISODES - episode_start);
+
+                // Вектор фьючерсов для асинхронных игр
+                std::vector<std::future<std::pair<int, int>>> futures;
+                // Вектор локальных буферов (каждый для своей игры)
+                std::vector<std::vector<ReplayBuffer::value_type>> local_buffers(batch_games);
+
+                for (int i = 0; i < batch_games; ++i) {
+                    futures.push_back(pool.enqueue(
+                        [&, i, episode_idx = episode_start + i]() -> std::pair<int, int> {
+
+                            // Запускаем игру, передавая локальный буфер
+                            auto [game_result, steps] = play_game(
+                                all_mcts[i], &local_buffers[i],
+                                net, net,
+                                STEPS_BEFORE_TAU_0, MCTS_SEARCHES, MCTS_BATCH_SIZE,
+                                std::nullopt, device
+                            );
+
+                            int leaves = static_cast<int>(all_mcts[i][0].size());
+                            return { steps, leaves };
+                        }
+                    ));
+                }
+
+                // Собираем результаты
+                for (int i = 0; i < batch_games; ++i) {
+                    auto [steps, leaves] = futures[i].get();
+                    game_steps += steps;
+                    total_leaves += leaves;
+                }
+
+                // Сливаем локальные буферы в общий (под мьютексом)
+                {
+                    std::lock_guard<std::mutex> lock(replay_mutex);
+                    for (const auto& local_buffer : local_buffers) {
+                        for (const auto& exp : local_buffer) {
+                            replay_buffer.push_back(exp);
+                            if (replay_buffer.size() > REPLAY_BUFFER_SIZE) {
+                                replay_buffer.pop_front();
+                            }
+                        }
+                    }
+                }
+            }
         }
+        net->train();
 
         size_t game_nodes = total_leaves;
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -366,9 +400,6 @@ int main(int argc, char** argv) {
         float speed_steps = static_cast<float>(game_steps) / dt;
         float speed_nodes = static_cast<float>(game_nodes) / dt;
 
-        tracker.track("speed_steps", speed_steps, step_idx);
-        tracker.track("speed_nodes", speed_nodes, step_idx);
-
         // Print the same format as Python version + MCTS info
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "Step " << step_idx
@@ -376,10 +407,15 @@ int main(int argc, char** argv) {
             << ", leaves " << std::setw(4) << game_nodes
             << ", steps/s " << std::setw(5) << speed_steps
             << ", leaves/s " << std::setw(6) << speed_nodes
-            << ", best_idx " << best_idx
             << ", replay " << replay_buffer.size() << std::endl;
 
         step_idx++;
+        if (step_idx == ADJUSTED_IDX_1) {
+            LEARNING_RATE = LEARNING_RATE_ADJUSTED_1;
+        }
+        if (step_idx == ADJUSTED_IDX_2) {
+            LEARNING_RATE = LEARNING_RATE_ADJUSTED_2;
+        }
 
         // Check for termination after episodes
         if (terminate_requested) break;
@@ -406,27 +442,7 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            // Prioritized sampling based on data age (recent data has higher priority)
-            size_t buffer_size = std::min(replay_buffer.size(), static_cast<size_t>(200000));
-            std::vector<float> priorities(buffer_size);
-            float total_priority = 0.0f;
-
-            // Calculate priorities - exponential decay based on age
-            for (size_t i = 0; i < buffer_size; ++i) {
-                float age = static_cast<float>(buffer_size - 1 - i);
-                float priority = std::exp(-age / 50000.0f); // Adjust decay constant based on buffer size
-                priorities[i] = priority;
-                total_priority += priority;
-            }
-
-            // Normalize priorities to create discrete distribution
-            if (total_priority > 0.0f) {
-                for (float& p : priorities) {
-                    p /= total_priority;
-                }
-            }
-
-            std::discrete_distribution<size_t> dist(priorities.begin(), priorities.end());
+            std::uniform_int_distribution<> dist(0, replay_buffer.size() - 1);
 
             for (int i = 0; i < BATCH_SIZE; ++i) {
                 size_t idx = dist(rng);
@@ -450,9 +466,33 @@ int main(int argc, char** argv) {
                 batch_probs.push_back(probs);
                 batch_values.push_back(value);
             }
+            if (train_round == 0) {
 
+                float avg_entropy = 0;
+                int batch_count = 0;
+
+                for (const auto& entry : batch) {
+                    const auto& probs = std::get<2>(entry);  // Policy targets from MCTS
+                    float entropy = 0;
+                    for (float p : probs) {
+                        if (p > 1e-6) {
+                            entropy -= p * std::log(p + 1e-10);
+                        }
+                    }
+                    avg_entropy += entropy;
+                    batch_count++;
+                }
+
+                avg_entropy /= batch_count;
+                std::cout << "Avg policy target entropy: " << avg_entropy << std::endl;
+            }
             // Convert to tensors
             auto states_v = state_lists_to_batch(batch_states, batch_who_moves, device);
+            //Test 1
+            /*std::cout << "Batch tensor stats: "
+                << "mean=" << states_v.mean().item<float>() << ", "
+                << "std=" << states_v.std().item<float>() << ", "
+                << "non-zero=" << (states_v != 0).sum().item<int64_t>() << std::endl;*/
 
             // Convert probs and values to tensors
             torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(BATCH_SIZE), GAME_COLS }, torch::kFloat32);
@@ -481,10 +521,20 @@ int main(int argc, char** argv) {
             auto loss_policy_v = -log_probs * probs_v;
             loss_policy_v = loss_policy_v.sum(1).mean();
 
-            auto loss_v = loss_policy_v + loss_value_v;
 
+            auto loss_v = loss_policy_v + loss_value_v;
             // Backward pass
             loss_v.backward();
+            //Test 2
+            /*float total_norm = 0.0f;
+            for (const auto& p : net->parameters()) {
+                if (p.grad().defined()) {
+                    total_norm += p.grad().norm().item<float>();
+                }
+            }
+            std::cout << "Gradient norm: " << total_norm << std::endl; */
+
+            torch::nn::utils::clip_grad_norm_(net->parameters(), 1.0);
             optimizer.step();
 
             sum_loss += loss_v.item<float>();
@@ -499,61 +549,22 @@ int main(int argc, char** argv) {
         // Check for termination after training phase
         if (terminate_requested) break;
 
-        // Evaluation phase - with rolling average
-        if (step_idx % EVALUATE_EVERY_STEP == 0) {
-
-            // Get models first to create lvalues
-            Connect4Net current_net = net;
-            Connect4Net best_net_model = best_net.get_model();
-
-            float win_ratio = evaluate(current_net, best_net_model, EVALUATION_ROUNDS, device, EVALUATE_MCTS_SEARCHES);
-
-            std::cout << "Win ratio vs best model: " << std::fixed << std::setprecision(3)
-                << win_ratio << std::endl;
-
-            // Log evaluation result
-            if (csv_logger.is_open()) {
-                csv_logger.log(step_idx, "eval_win_ratio_vs_best", win_ratio);
-            }
-
-            if (win_ratio > WIN_RATIO) {
-                std::cout << "Net is better than current best (avg=" << win_ratio
-                    << " > " << WIN_RATIO << "), updating best model..." << std::endl;
-                best_net.sync(net);
-                best_idx++;
-
-                // Clear rolling window after successful update
-                rolling_win_ratios.clear();
-
-                // Save best model
-                std::ostringstream filename;
-                filename << "best_" << std::setw(3) << std::setfill('0') << best_idx
-                    << "_" << std::setw(5) << std::setfill('0') << step_idx << ".pt";
-
-                fs::path save_path = saves_path / filename.str();
-                save_model(net, save_path.string());
-                std::cout << "Saved best model to: " << save_path.string() << std::endl;
-                clear_replay_buffer(replay_buffer);
-            }
-        }
-
         // Check for termination after evaluation
         if (terminate_requested) break;
 
-        // Save checkpoint every 1000 steps
-        if (step_idx % 1000 == 0) {
-            std::ostringstream filename;
-            filename << "checkpoint_" << std::setw(5) << std::setfill('0') << step_idx
-                << "_mcts" << ".pt";
-            fs::path save_path = saves_path / filename.str();
-            save_model(net, save_path.string());
-            std::cout << "Saved checkpoint to: " << save_path.string() << std::endl;
-        }
+        Connect4Net current_net = net;
+
+        std::ostringstream filename;
+        filename << "checkpoint_" << std::setw(5) << std::setfill('0') << step_idx
+            << ".pt";
+        fs::path save_path = saves_path / filename.str();
+        save_model(net, save_path.string());
+        std::cout << "Saved periodic checkpoint to: " << save_path.string() << std::endl;
     }
 
     // Handle graceful shutdown
     if (terminate_requested) {
-        save_and_exit(net, saves_path, step_idx, best_idx, MCTS_SEARCHES);
+        save_and_exit(net, saves_path, step_idx);
         return 0;
     }
 

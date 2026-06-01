@@ -16,14 +16,13 @@ namespace Connect4 {
     // Play game function
     std::pair<float, int> play_game(
         std::vector<class MCTS>& mcts_stores,
-        ReplayBuffer* replay_buffer,
+        std::vector<ReplayBuffer::value_type>* local_buffer,
         Connect4Net& net1,
         Connect4Net& net2,
         int steps_before_tau_0,
         int mcts_searches,
         int mcts_batch_size,
         std::optional<bool> net1_plays_first,
-        const torch::Device& device,
-        size_t REPLAY_BUFFER_SIZE);
+        const torch::Device& device);
 
 } // namespace Connect4

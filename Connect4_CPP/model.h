@@ -27,17 +27,13 @@ namespace Connect4 {
 
     class Connect4NetImpl : public torch::nn::Module {
     public:
-        Connect4NetImpl();
+        Connect4NetImpl(int num_blocks = 5);
 
         std::pair<torch::Tensor, torch::Tensor> forward(torch::Tensor x);
 
     private:
         torch::nn::Sequential conv_in = nullptr;
-        ResidualBlock block1 = nullptr;
-        ResidualBlock block2 = nullptr;
-        ResidualBlock block3 = nullptr;
-        ResidualBlock block4 = nullptr;
-        ResidualBlock block5 = nullptr;
+        torch::nn::ModuleList residual_blocks;
 
         torch::nn::Sequential conv_val = nullptr;
         torch::nn::Linear val_linear1 = nullptr;

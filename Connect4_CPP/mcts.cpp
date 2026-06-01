@@ -1,20 +1,25 @@
-#pragma once
 #include "mcts.h"
 #include <numeric>
 #include <execution>
 #include <thread>
-#include <unordered_map>
-#include <vector>
-#include <tuple>
-#include <cmath>
-#include <limits>
-#include <random>
-#include <algorithm>
-#include <cassert>
-#include <stdexcept>
-#include <iostream>
 
 namespace Connect4 {
+
+    // === VIRTUAL LOSS CONFIGURATION ===
+    constexpr float VIRTUAL_LOSS = 2.0f;  // Typical range: 1.0–3.0
+
+    // Helper struct to bundle backup data + virtual loss path
+    struct BackupEntry {
+        std::vector<GameState> states;
+        std::vector<int> actions;
+        std::vector<std::pair<uint64_t, int>> virtual_loss_path;  // Track penalized edges
+
+        // Constructor for easy emplace_back
+        BackupEntry(std::vector<GameState> s, std::vector<int> a,
+            std::vector<std::pair<uint64_t, int>> vlp)
+            : states(std::move(s)), actions(std::move(a)), virtual_loss_path(std::move(vlp)) {
+        }
+    };
 
     void MCTSNode::reset() {
         std::fill(visit_count.begin(), visit_count.end(), 0);
@@ -26,7 +31,17 @@ namespace Connect4 {
     MCTS::MCTS(float c_puct) : c_puct_(c_puct) {
         std::random_device rd;
         rng_.seed(rd());
-        dirichlet_dist_ = std::gamma_distribution<float>(0.03f, 1.0f);
+        dirichlet_dist_ = std::gamma_distribution<float>(0.3f, 1.0f);
+        tree_.reserve(10000);
+    }
+
+    MCTS::MCTS(const MCTS& other)
+        : c_puct_(other.c_puct_),
+        tree_(other.tree_),
+        rng_(other.rng_),
+        dirichlet_dist_(other.dirichlet_dist_) {
+        std::random_device rd;
+        rng_.seed(rd());
     }
 
     void MCTS::clear() {
@@ -40,25 +55,21 @@ namespace Connect4 {
     std::array<float, GAME_COLS> MCTS::generate_dirichlet_noise() {
         std::array<float, GAME_COLS> noise;
         float sum = 0.0f;
-
-        // Generate gamma distributed samples
         for (int i = 0; i < GAME_COLS; ++i) {
             noise[i] = dirichlet_dist_(rng_);
             sum += noise[i];
         }
-
-        // Normalize to get Dirichlet distribution
         if (sum > 0.0f) {
-            for (float& n : noise) {
-                n /= sum;
-            }
+            for (float& n : noise) n /= sum;
         }
-
         return noise;
     }
 
+    // === ENHANCED: find_leaf with virtual loss tracking ===
     std::tuple<float, GameState, Player, std::vector<GameState>, std::vector<int>>
-        MCTS::find_leaf(const GameState& root_state, Player player) {
+        MCTS::find_leaf(const GameState& root_state, Player player,
+            std::vector<std::pair<uint64_t, int>>* virtual_loss_path) {
+
         std::vector<GameState> states;
         std::vector<int> actions;
         GameState cur_state = root_state;
@@ -67,28 +78,23 @@ namespace Connect4 {
 
         while (!is_leaf(cur_state)) {
             states.push_back(cur_state);
-
             uint64_t cur_key = cur_state.to_key();
+
+            // Safe access: node must exist if !is_leaf()
             const auto& node = tree_.at(cur_key);
 
-            int total_visits = std::accumulate(node.visit_count.begin(), node.visit_count.end(), 0);
-            float total_sqrt = std::sqrt(static_cast<float>(total_visits));
+            float total_sqrt = std::sqrt(static_cast<float>(std::accumulate(
+                node.visit_count.begin(), node.visit_count.end(), 0)));
 
             std::array<float, GAME_COLS> score;
             const auto& probs = node.probs;
             const auto& values_avg = node.value_avg;
             const auto& counts = node.visit_count;
 
-            // Choose action to take - check if this is the root node
-            bool is_root = (cur_state.to_key() == root_state.to_key());
-
-            if (is_root) {
-                auto noises = generate_dirichlet_noise();
-                const float epsilon = 0.25f; // Standard AlphaZero epsilon
-
+            // Choose action via UCB (with optional Dirichlet noise at root)
+            if (cur_state.to_key() == root_state.to_key() && use_noise) {
                 for (int i = 0; i < GAME_COLS; ++i) {
-                    float mixed_prob = (1.0f - epsilon) * probs[i] + epsilon * noises[i];
-                    score[i] = values_avg[i] + c_puct_ * mixed_prob *
+                    score[i] = values_avg[i] + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
                         total_sqrt / (1.0f + static_cast<float>(counts[i]));
                 }
             }
@@ -99,55 +105,57 @@ namespace Connect4 {
                 }
             }
 
-            // Get valid moves
+            // Mask invalid actions
             auto valid_moves = GameLogic::get_possible_moves(cur_state);
             std::vector<bool> valid_mask(GAME_COLS, false);
-
-            for (int move : valid_moves) {
-                if (move >= 0 && move < GAME_COLS) {
-                    valid_mask[move] = true;
-                }
-            }
-
-            if (valid_moves.empty()) {
-                // Draw position
-                value = 0.0f;
-                return { value, cur_state, cur_player, std::move(states), std::move(actions) };
-            }
+            for (int move : valid_moves) valid_mask[move] = true;
 
             int best_action = -1;
             float best_score = -std::numeric_limits<float>::infinity();
 
             for (int i = 0; i < GAME_COLS; ++i) {
-                if (!valid_mask[i]) continue;
+                if (!valid_mask[i]) score[i] = -std::numeric_limits<float>::infinity();
                 if (score[i] > best_score) {
                     best_score = score[i];
                     best_action = i;
                 }
             }
 
-            if (best_action < 0 || best_action >= GAME_COLS) {
-                throw std::runtime_error("MCTS: No valid action selected. Best action: " + std::to_string(best_action));
+            if (best_action == -1) {
+                throw std::runtime_error("No valid moves found in MCTS");
             }
 
             actions.push_back(best_action);
 
+            // === VIRTUAL LOSS: Apply penalty BEFORE recursing ===
+            if (virtual_loss_path != nullptr) {
+                // Penalize the edge we're about to traverse
+                // Note: node is non-const reference because we need to modify it
+                auto& mutable_node = tree_[cur_key];  // Safe: node exists
+                mutable_node.value[best_action] -= VIRTUAL_LOSS;
+                virtual_loss_path->emplace_back(cur_key, best_action);
+            }
+
             auto [new_state, won] = GameLogic::make_move(cur_state, best_action);
 
-            // Check win FIRST - critical fix
             if (won) {
-                value = -1.0f; // From perspective of next player (who lost)
+                value = -1.0f;  // Terminal win: -1 from opponent's perspective
                 return { value, new_state, static_cast<Player>(1 - static_cast<int>(cur_player)),
-                       std::move(states), std::move(actions) };
+                         std::move(states), std::move(actions) };
             }
 
             cur_state = new_state;
             cur_player = static_cast<Player>(1 - static_cast<int>(cur_player));
+
+            if (GameLogic::get_possible_moves(cur_state).empty()) {
+                value = 0.0f;  // Draw
+                return { value, cur_state, cur_player, std::move(states), std::move(actions) };
+            }
         }
 
         uint64_t leaf_key = cur_state.to_key();
-
-        return { std::numeric_limits<float>::quiet_NaN(), cur_state, cur_player, std::move(states), std::move(actions) };
+        return { std::numeric_limits<float>::quiet_NaN(), cur_state, cur_player,
+                 std::move(states), std::move(actions) };
     }
 
     bool MCTS::is_leaf(const GameState& state) const {
@@ -165,34 +173,65 @@ namespace Connect4 {
     void MCTS::search_minibatch(int count, const GameState& state, Player player,
         Connect4Net& net, const torch::Device& device) {
 
-        std::vector<std::tuple<float, std::vector<GameState>, std::vector<int>>> backup_queue;
+        std::unordered_map<uint64_t, std::vector<BackupEntry>> pending_backups;
         std::vector<GameState> expand_states;
         std::vector<Player> expand_players;
-        std::vector<std::tuple<GameState, std::vector<GameState>, std::vector<int>>> expand_queue;
-        std::unordered_set<uint64_t> planned_expansions;
+        std::unordered_set<uint64_t> planned;
 
-        // Phase 1: Find leaf nodes for all searches
+        // === Phase 1: Find leaves with virtual loss ===
         for (int i = 0; i < count; ++i) {
             try {
-                auto [value, leaf_state, leaf_player, states, actions] = find_leaf(state, player);
+                dirichlet_noise = generate_dirichlet_noise();
+
+                // Track virtual loss path for this search
+                std::vector<std::pair<uint64_t, int>> virtual_loss_path;
+
+                auto [value, leaf_state, leaf_player, states, actions] =
+                    find_leaf(state, player, &virtual_loss_path);
 
                 if (!std::isnan(value)) {
-                    // Terminal state - backup immediately
-                    backup_queue.emplace_back(value, std::move(states), std::move(actions));
+                    // === Terminal backup: reverse virtual loss THEN apply real update ===
+                    float terminal_value = value;
+                    float cur_value = -terminal_value;
+
+                    for (int j = static_cast<int>(states.size()) - 1; j >= 0; --j) {
+                        if (j < static_cast<int>(actions.size()) &&
+                            actions[j] >= 0 && actions[j] < GAME_COLS) {
+
+                            uint64_t state_key = states[j].to_key();
+                            if (tree_.find(state_key) == tree_.end()) {
+                                tree_[state_key] = MCTSNode();
+                            }
+                            auto& node = tree_[state_key];
+
+                            // === Reverse virtual loss if this edge was penalized ===
+                            if (!virtual_loss_path.empty() &&
+                                virtual_loss_path.back().first == state_key &&
+                                virtual_loss_path.back().second == actions[j]) {
+                                node.value[actions[j]] += VIRTUAL_LOSS;  // Undo penalty
+                                virtual_loss_path.pop_back();
+                            }
+
+                            // Normal backup
+                            node.visit_count[actions[j]]++;
+                            node.value[actions[j]] += cur_value;
+                            node.value_avg[actions[j]] = node.value[actions[j]] /
+                                static_cast<float>(node.visit_count[actions[j]]);
+
+                            cur_value = -cur_value;
+                        }
+                    }
                 }
                 else {
+                    // === Non-terminal: queue for NN expansion ===
                     uint64_t leaf_key = leaf_state.to_key();
+                    pending_backups[leaf_key].emplace_back(
+                        std::move(states), std::move(actions), std::move(virtual_loss_path));
 
-                    if (planned_expansions.find(leaf_key) == planned_expansions.end()) {
-                        // First time seeing this leaf - plan for expansion
-                        planned_expansions.insert(leaf_key);
+                    if (planned.find(leaf_key) == planned.end()) {
+                        planned.insert(leaf_key);
                         expand_states.push_back(leaf_state);
                         expand_players.push_back(leaf_player);
-                        expand_queue.emplace_back(leaf_state, std::move(states), std::move(actions));
-                    }
-                    else {
-                        // This leaf will be expanded - add to backup queue later
-                        backup_queue.emplace_back(0.0f, std::move(states), std::move(actions)); // Placeholder, will be replaced
                     }
                 }
             }
@@ -202,86 +241,96 @@ namespace Connect4 {
             }
         }
 
-        // Phase 2: Expand nodes
-        if (!expand_queue.empty()) {
+        // === Phase 2: Expand nodes with batched NN query ===
+        if (!expand_states.empty()) {
             try {
-                // Convert states to batch tensor
-                auto batch_v = state_lists_to_batch(expand_states, expand_players, device);
+                std::vector<std::future<std::pair<std::array<float, GAME_COLS>, float>>> futures;
+                futures.reserve(expand_states.size());
 
-                // Forward pass through network
-                torch::NoGradGuard no_grad;
-                auto output = net->forward(batch_v);
-                auto logits_v = std::get<0>(output);
-                auto values_v = std::get<1>(output);
-                auto probs_v = torch::softmax(logits_v, 1);
-                auto values = values_v.squeeze(1).cpu();
-                auto probs = probs_v.cpu();
+                for (size_t i = 0; i < expand_states.size(); ++i) {
+                    futures.push_back(neural_worker_->submit_query(
+                        expand_states[i], expand_players[i]));
+                }
 
-                // Create nodes and fill backup queue
-                for (size_t i = 0; i < expand_queue.size(); ++i) {
-                    auto& [leaf_state, states, actions] = expand_queue[i];
+                // === Phase 3: Create nodes and backup ALL pending searches ===
+                for (size_t i = 0; i < expand_states.size(); ++i) {
+                    const auto& leaf_state = expand_states[i];
                     uint64_t leaf_key = leaf_state.to_key();
-                    float value = values[i].item<float>();
 
-                    // Create node if it doesn't exist
+                    auto [probs, value] = futures[i].get();
+
+                    // Create node if needed
                     if (tree_.find(leaf_key) == tree_.end()) {
                         MCTSNode node;
-                        auto prob_row = probs[i];
-                        auto prob_accessor = prob_row.accessor<float, 1>();
+                        auto valid_moves = GameLogic::get_possible_moves(leaf_state);
+                        std::vector<bool> valid_mask(GAME_COLS, false);
+                        for (int move : valid_moves) valid_mask[move] = true;
+
                         for (int j = 0; j < GAME_COLS; ++j) {
-                            node.probs[j] = (j < prob_accessor.size(0)) ? prob_accessor[j] : 0.0f;
+                            node.probs[j] = valid_mask[j] ? probs[j] : 0.0f;
                             node.visit_count[j] = 0;
                             node.value[j] = 0.0f;
                             node.value_avg[j] = 0.0f;
                         }
+
+                        float sum = std::accumulate(node.probs.begin(), node.probs.end(), 0.0f);
+                        if (sum > 1e-8f) {
+                            for (float& p : node.probs) p /= sum;
+                        }
                         tree_[leaf_key] = std::move(node);
                     }
 
-                    // Backup with neural network value
-                    backup_queue.emplace_back(value, std::move(states), std::move(actions));
+                    // Backup ALL paths that reached this leaf
+                    auto it = pending_backups.find(leaf_key);
+                    if (it != pending_backups.end()) {
+                        for (auto& [states, actions, vloss_path] : it->second) {
+                            float cur_value = -value;  // Flip perspective
+
+                            for (int j = static_cast<int>(states.size()) - 1; j >= 0; --j) {
+                                if (j < static_cast<int>(actions.size()) &&
+                                    actions[j] >= 0 && actions[j] < GAME_COLS) {
+
+                                    uint64_t state_key = states[j].to_key();
+                                    if (tree_.find(state_key) == tree_.end()) {
+                                        tree_[state_key] = MCTSNode();
+                                    }
+                                    auto& node = tree_[state_key];
+
+                                    // === Reverse virtual loss before real update ===
+                                    if (!vloss_path.empty() &&
+                                        vloss_path.back().first == state_key &&
+                                        vloss_path.back().second == actions[j]) {
+                                        node.value[actions[j]] += VIRTUAL_LOSS;
+                                        vloss_path.pop_back();
+                                    }
+
+                                    // Normal backup
+                                    node.visit_count[actions[j]]++;
+                                    node.value[actions[j]] += cur_value;
+                                    node.value_avg[actions[j]] = node.value[actions[j]] /
+                                        static_cast<float>(node.visit_count[actions[j]]);
+
+                                    cur_value = -cur_value;
+                                }
+                            }
+                        }
+                        pending_backups.erase(it);
+                    }
                 }
             }
             catch (const std::exception& e) {
                 std::cerr << "Neural network expansion error: " << e.what() << std::endl;
+                // === CRITICAL: Clean up virtual loss on NN failure ===
+                for (auto& [leaf_key, backups] : pending_backups) {
+                    for (auto& [states, actions, vloss_path] : backups) {
+                        for (auto& [key, action] : vloss_path) {
+                            if (tree_.find(key) != tree_.end()) {
+                                tree_[key].value[action] += VIRTUAL_LOSS;
+                            }
+                        }
+                    }
+                }
                 return;
-            }
-        }
-
-        // Phase 3: Backup values - with strict bounds checking
-        for (auto& [value, states, actions] : backup_queue) {
-            if (std::isnan(value)) continue;
-
-            float cur_value = -value; // Start from leaf perspective
-            for (int i = static_cast<int>(states.size()) - 1; i >= 0; --i) {
-                if (i >= static_cast<int>(actions.size()) || i < 0) {
-                    continue; // Skip if action index is invalid
-                }
-
-                int action = actions[i];
-                if (action < 0 || action >= GAME_COLS) {
-                    continue; // Skip invalid actions
-                }
-
-                const auto& state = states[i];
-                uint64_t state_key = state.to_key();
-
-                // Ensure node exists
-                if (tree_.find(state_key) == tree_.end()) {
-                    tree_[state_key] = MCTSNode();
-                }
-
-                auto& node = tree_[state_key];
-
-                // SAFETY CHECK: Validate action bounds before accessing
-                if (action < 0 || action >= static_cast<int>(node.visit_count.size())) {
-                    continue;
-                }
-
-                node.visit_count[action]++;
-                node.value[action] += cur_value;
-                node.value_avg[action] = node.value[action] / static_cast<float>(node.visit_count[action]);
-
-                cur_value = -cur_value; // Flip perspective for parent
             }
         }
     }
@@ -289,95 +338,34 @@ namespace Connect4 {
     std::pair<std::array<float, GAME_COLS>, std::array<float, GAME_COLS>>
         MCTS::get_policy_value(const GameState& state, float tau) const {
         uint64_t state_key = state.to_key();
-
-        // Handle case where state hasn't been searched yet
-        auto it = tree_.find(state_key);
-        if (it == tree_.end()) {
-            std::array<float, GAME_COLS> uniform_probs;
-            std::array<float, GAME_COLS> zero_values;
-            float uniform_prob = 1.0f / GAME_COLS;
-            std::fill(uniform_probs.begin(), uniform_probs.end(), uniform_prob);
-            std::fill(zero_values.begin(), zero_values.end(), 0.0f);
-            return { uniform_probs, zero_values };
-        }
-
-        const auto& node = it->second;
+        const auto& node = tree_.at(state_key);
 
         std::array<float, GAME_COLS> probs;
         std::array<float, GAME_COLS> values;
 
-        if (tau == 0.0f || tau < 1e-6f) {
-            // Deterministic policy - most visited action
+        if (tau == 0.0f) {
             std::fill(probs.begin(), probs.end(), 0.0f);
-            int best_action = 0;
-            int max_visits = -1;
-
+            int best_action = std::distance(node.visit_count.begin(),
+                std::max_element(node.visit_count.begin(), node.visit_count.end()));
+            probs[best_action] = 1.0f;
+        }
+        else {
+            std::array<float, GAME_COLS> counts_pow;
+            float sum = 0.0f;
             for (int i = 0; i < GAME_COLS; ++i) {
-                if (node.visit_count[i] > max_visits) {
-                    max_visits = node.visit_count[i];
-                    best_action = i;
-                }
+                counts_pow[i] = std::pow(static_cast<float>(node.visit_count[i]), 1.0f / tau);
+                sum += counts_pow[i];
             }
-
-            if (max_visits > 0 && best_action >= 0 && best_action < GAME_COLS) {
-                probs[best_action] = 1.0f;
+            if (sum > 0.0f) {
+                for (int i = 0; i < GAME_COLS; ++i) probs[i] = counts_pow[i] / sum;
             }
             else {
-                // Fallback to uniform if no visits
                 float uniform_prob = 1.0f / GAME_COLS;
                 std::fill(probs.begin(), probs.end(), uniform_prob);
             }
         }
-        else {
-            // Stochastic policy with temperature
-            std::array<float, GAME_COLS> counts_pow;
-            float sum = 0.0f;
 
-            for (int i = 0; i < GAME_COLS; ++i) {
-                if (node.visit_count[i] > 0) {
-                    counts_pow[i] = std::pow(static_cast<float>(node.visit_count[i]), 1.0f / tau);
-                    sum += counts_pow[i];
-                }
-                else {
-                    counts_pow[i] = 0.0f;
-                }
-            }
-
-            if (sum > 1e-8f) {
-                for (int i = 0; i < GAME_COLS; ++i) {
-                    probs[i] = counts_pow[i] / sum;
-                }
-            }
-            else {
-                // Fallback to uniform distribution among valid moves
-                auto valid_moves = GameLogic::get_possible_moves(state);
-                if (!valid_moves.empty()) {
-                    float valid_prob = 1.0f / static_cast<float>(valid_moves.size());
-                    std::fill(probs.begin(), probs.end(), 0.0f);
-                    for (int move : valid_moves) {
-                        if (move >= 0 && move < GAME_COLS) {
-                            probs[move] = valid_prob;
-                        }
-                    }
-                }
-                else {
-                    float uniform_prob = 1.0f / GAME_COLS;
-                    std::fill(probs.begin(), probs.end(), uniform_prob);
-                }
-            }
-        }
-
-        // Copy values - handle unvisited actions safely
-        for (int i = 0; i < GAME_COLS; ++i) {
-            if (node.visit_count[i] > 0) {
-                values[i] = node.value_avg[i];
-            }
-            else {
-                // For unvisited actions, use the prior probability as a heuristic
-                values[i] = node.probs[i] * 2.0f - 1.0f; // Scale to [-1, 1] range
-            }
-        }
-
+        for (int i = 0; i < GAME_COLS; ++i) values[i] = node.value_avg[i];
         return { probs, values };
     }
 

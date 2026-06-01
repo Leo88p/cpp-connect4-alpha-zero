@@ -7,6 +7,9 @@
 #include "mcts.h"
 #include "model.h"
 #include "game_play.h"
+#include "minimax_player.h"
+#include "oracle.h"
+#include "neural_worker.h"
 
 namespace py = pybind11;
 using namespace Connect4;
@@ -39,9 +42,11 @@ private:
 class PyNet {
 public:
     PyNet() : net(std::make_shared<Connect4NetImpl>()) {}
-    PyNet(const std::string& path, const std::string& device_str = "cpu")
-        : net(std::make_shared<Connect4NetImpl>()) {
+    PyNet(const std::string& path, const int blocks, const std::string& device_str = "cpu")
+        : net(std::make_shared<Connect4NetImpl>(blocks)) {
         load(path, device_str);
+        net->eval();
+        torch::NoGradGuard no_grad;
     }
 
     void load(const std::string& path, const std::string& device_str = "cpu") {
@@ -118,13 +123,19 @@ private:
 // Wrapper for MCTS
 class PyMCTS {
 public:
-    PyMCTS(float c_puct = 1.0f) : mcts(c_puct) {}
+    PyMCTS(float c_puct = 1.0f) : mcts(c_puct) { 
+        mcts.use_noise = false; 
+    }
 
     void search_batch(int count, int batch_size, const PyGameState& state,
         int player, PyNet& net_wrapper, const std::string& device_str) {
         torch::Device device(device_str);
         // Get the actual network from the wrapper
         Connect4Net net = net_wrapper.get_net();
+        if (!neural_worker_) {
+            neural_worker_ = std::make_unique<Connect4::NeuralWorker>(net, device, 256);
+            mcts.set_neural_worker(neural_worker_.get());
+        }
         mcts.search_batch(count, batch_size, state.get_state(),
             static_cast<Player>(player), net, device);
     }
@@ -150,6 +161,33 @@ public:
 
 private:
     MCTS mcts;
+    std::unique_ptr<Connect4::NeuralWorker> neural_worker_ = nullptr;
+};
+
+class PyMinimaxPlayer {
+public:
+    PyMinimaxPlayer(size_t tt_size_mb = 64) : minimaxPlayer(tt_size_mb) {}
+    int find_best_move(const PyGameState& state, int max_depth = 42) { 
+        return minimaxPlayer.find_best_move(state.get_state(), max_depth); 
+    }
+    void clear() { minimaxPlayer.clear(); }
+private:
+    MinimaxPlayer minimaxPlayer;
+};
+class PyOracle {
+public:
+    PyOracle(int minimax_time_limit_ms = 500) : oracle(minimax_time_limit_ms) {}
+    int get_best_move(const PyGameState& state) {
+        return oracle.get_best_move(state.get_state());
+    };
+    AnalysisResult analyze_game(const std::vector<int>& moves, int opponent_player) {
+        return oracle.analyze_game(moves, static_cast<Player>(opponent_player));
+    };
+    bool load_uci_dataset(const std::string& filepath) {
+        return oracle.load_uci_dataset(filepath);
+    };
+private:
+    Oracle oracle;
 };
 
 // Play game function wrapper
@@ -161,9 +199,6 @@ py_play_game(PyMCTS& mcts1, PyMCTS& mcts2, PyNet& net1, PyNet& net2,
 
     torch::Device device(device_str);
 
-    // Create replay buffer (not used for visualization, but needed for function signature)
-    ReplayBuffer replay_buffer;
-    replay_buffer.resize(max_replay_size);
 
     std::vector<MCTS> mcts_stores;
     mcts_stores.push_back(MCTS(1.0f)); // Copy from PyMCTS
@@ -172,10 +207,10 @@ py_play_game(PyMCTS& mcts1, PyMCTS& mcts2, PyNet& net1, PyNet& net2,
     auto n1 = net1.get_net();
     auto n2 = net2.get_net();
     auto [result, steps] = play_game(
-        mcts_stores, &replay_buffer,
+        mcts_stores, nullptr,
         n1, n2,
         steps_before_tau_0, mcts_searches, mcts_batch_size,
-        net1_plays_first, device, max_replay_size
+        net1_plays_first, device
     );
 
     // For visualization, we just need the result and steps
@@ -218,12 +253,37 @@ PYBIND11_MODULE(connect4_core, m) {
 
     py::class_<PyNet>(m, "Net")
         .def(py::init<>())
-        .def(py::init<const std::string&, const std::string&>(),
-            py::arg("path"), py::arg("device") = "cpu")
+        .def(py::init<const std::string&, const int, const std::string&>(),
+            py::arg("path"), py::arg("blocks"), py::arg("device") = "cpu")
         .def("load", &PyNet::load,
             py::arg("path"), py::arg("device") = "cpu")
         .def("forward", &PyNet::forward)
         .def("get_net", &PyNet::get_net);
+
+    py::class_<PyMinimaxPlayer>(m, "MinimaxPlayer")
+        .def(py::init<size_t>(),
+            py::arg("tt_size_mb") = 64)
+        .def("clear", &PyMinimaxPlayer::clear)
+        .def("find_best_move", &PyMinimaxPlayer::find_best_move,
+            py::arg("state"), py::arg("max_depth") = 42);
+
+    py::class_<AnalysisResult>(m, "AnalysisResult")
+        .def_readonly("forced", &AnalysisResult::forced)
+        .def_readonly("best_move", &AnalysisResult::best_move)
+        .def_readonly("good_move", &AnalysisResult::good_move)
+        .def_readonly("mistake", &AnalysisResult::mistake)
+        .def_readonly("blunder", &AnalysisResult::blunder)
+        .def_readonly("total", &AnalysisResult::total);
+
+    py::class_<PyOracle>(m, "Oracle")
+        .def(py::init<int>(),
+            py::arg("minimax_time_limit_ms") = 500)
+        .def("get_best_move", &PyOracle::get_best_move,
+            py::arg("state"))
+        .def("analyze_game", &PyOracle::analyze_game,
+            py::arg("moves"), py::arg("opponent_player"))
+        .def("load_uci_dataset", &PyOracle::load_uci_dataset,
+            py::arg("filepath"));
 
     m.def("play_game", &py_play_game,
         py::arg("mcts1"), py::arg("mcts2"), py::arg("net1"), py::arg("net2"),
