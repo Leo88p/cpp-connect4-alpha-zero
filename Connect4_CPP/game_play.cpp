@@ -18,7 +18,7 @@ namespace Connect4 {
         std::optional<bool> net1_plays_first,
         const torch::Device& device) {
 
-        GameState state = GameLogic::INITIAL_STATE;
+        GameState state = GameState();
         std::vector<Connect4Net> nets = { net1, net2 };
 
         int cur_player_int;
@@ -63,29 +63,27 @@ namespace Connect4 {
 
             if (!state.is_valid_move(action)) {
                 // Fallback to first valid move if selected action is invalid
-                auto valid_moves = GameLogic::get_possible_moves(state);
-                if (!valid_moves.empty()) {
-                    action = valid_moves[0];
+                auto valid_moves = state.get_possible_moves();
+                if (valid_moves.count != 0) {
+                    action = valid_moves.columns[0];
                 }
                 else {
                     throw std::runtime_error("No valid moves available");
                 }
             }
 
-            auto [new_state, won] = GameLogic::make_move(state, action);
+            bool won = state.make_move(action);
 
             if (won) {
                 result = 1.0f;
                 net1_result = (cur_player_int == 0) ? 1.0f : -1.0f;
-                state = new_state;
                 break;
             }
-            state = new_state;
             cur_player_int = 1 - cur_player_int;
             cur_player = static_cast<Player>(cur_player_int);
 
             // Check for draw
-            if (GameLogic::get_possible_moves(state).empty()) {
+            if (state.get_possible_moves().count == 0) {
                 result = 0.0f;
                 net1_result = 0.0f;
                 break;
@@ -104,41 +102,40 @@ namespace Connect4 {
                 const auto& [s, p, pr] = *it;
                 local_buffer->emplace_back(std::make_tuple(s, p, pr, current_result));
 
-                GameState flipped = s;
                 uint64_t new_black = 0, new_white = 0;
 
-                // Simple bitboard flip (row by row)
-                for (int row = 0; row < 6; ++row) {
-                    for (int col = 0; col < 7; ++col) {
-                        int orig_pos = row * 7 + col;
-                        int flip_pos = row * 7 + (6 - col);
+                for (int col = 0; col < 7; ++col) {
+                    int flip_col = 6 - col;
 
-                        if (s.black_pieces & (1ULL << orig_pos))
-                            new_black |= (1ULL << flip_pos);
-                        if (s.white_pieces & (1ULL << orig_pos))
-                            new_white |= (1ULL << flip_pos);
-                    }
+                    // Extract the 7 bits of the current column (including the 0 sentinel bit)
+                    uint64_t mask = 0x7FULL << (col * 7);
+
+                    // Move the column to its mirrored position using fast bitwise shifts
+                    new_black |= ((s.black_pieces & mask) >> (col * 7)) << (flip_col * 7);
+                    new_white |= ((s.white_pieces & mask) >> (col * 7)) << (flip_col * 7);
                 }
 
+                GameState flipped = s;
                 flipped.black_pieces = new_black;
                 flipped.white_pieces = new_white;
-                flipped.occupied = new_white | new_black;
 
-                for (int col = 0; col < 7; ++col) {
-                    int height = 0;
-                    for (int row = 0; row < 6; ++row) {
-                        int pos = row * 7 + col;
-                        if (flipped.occupied & (1ULL << pos))
-                            height = row + 1;
-                    }
-                    flipped.heights[col] = height;
+                // 2. Recompute the Zobrist hash for the flipped state
+                // (Required so MCTS and TT recognize this state correctly)
+                flipped.hash_key = 0;
+                for (int i = 0; i < 42; ++i) {
+                    if (new_black & (1ULL << i)) flipped.hash_key ^= ZOBRIST.table[i][0];
+                    if (new_white & (1ULL << i)) flipped.hash_key ^= ZOBRIST.table[i][1];
+                }
+                // Add the turn key if it's Black's turn (based on your make_move logic)
+                if (flipped.current_player == Player::BLACK) {
+                    flipped.hash_key ^= ZOBRIST.black_turn_key;
                 }
 
-                // Flip policy
+                // 3. Flip the policy (Column 0 becomes Column 6, etc.)
                 std::array<float, 7> flipped_probs;
-                for (int i = 0; i < 7; ++i)
+                for (int i = 0; i < 7; ++i) {
                     flipped_probs[i] = pr[6 - i];
-
+                }
                 local_buffer->emplace_back(std::make_tuple(flipped, p, flipped_probs, current_result));
                 current_result = -current_result;
             }

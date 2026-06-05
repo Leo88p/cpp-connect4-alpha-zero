@@ -4,11 +4,10 @@
 #include <torch/torch.h>
 
 #include "connect4_game.h"
+#include "connect4_solver.h"
 #include "mcts.h"
 #include "model.h"
 #include "game_play.h"
-#include "minimax_player.h"
-#include "oracle.h"
 #include "neural_worker.h"
 
 namespace py = pybind11;
@@ -17,22 +16,13 @@ using namespace Connect4;
 // Wrapper class for GameState to expose to Python
 class PyGameState {
 public:
-    PyGameState() : state(GameLogic::INITIAL_STATE) {}
+    PyGameState() : state(GameState()) {}
     PyGameState(const GameState& s) : state(s) {}
 
-    static PyGameState from_list_representation(const std::vector<std::vector<int>>& field_lists) {
-        return PyGameState(GameLogic::from_list_representation(field_lists));
-    }
-
-    std::vector<std::vector<int>> to_list_representation() const {
-        return GameLogic::to_list_representation(state);
-    }
-
-    static PyGameState initial_state() {
-        return PyGameState(GameLogic::INITIAL_STATE);
-    }
-
+    GameState& get_state() { return state; }
     GameState get_state() const { return state; }
+    bool make_move(int col) { return state.make_move(col); }
+    std::array<int, GAME_COLS> get_possible_moves() { return state.get_possible_moves().columns; }
 
 private:
     GameState state;
@@ -164,30 +154,15 @@ private:
     std::unique_ptr<Connect4::NeuralWorker> neural_worker_ = nullptr;
 };
 
-class PyMinimaxPlayer {
+class PySolver {
 public:
-    PyMinimaxPlayer(size_t tt_size_mb = 64) : minimaxPlayer(tt_size_mb) {}
-    int find_best_move(const PyGameState& state, int max_depth = 42) { 
-        return minimaxPlayer.find_best_move(state.get_state(), max_depth); 
+    PySolver(size_t tt_size) : solver(tt_size){}
+    std::pair<int, int8_t> solve(PyGameState& state, int depth) {
+        return solver.solve(state.get_state(), depth); 
     }
-    void clear() { minimaxPlayer.clear(); }
+    void clear_cache() { solver.clear_cache(); }
 private:
-    MinimaxPlayer minimaxPlayer;
-};
-class PyOracle {
-public:
-    PyOracle(int minimax_time_limit_ms = 500) : oracle(minimax_time_limit_ms) {}
-    int get_best_move(const PyGameState& state) {
-        return oracle.get_best_move(state.get_state());
-    };
-    AnalysisResult analyze_game(const std::vector<int>& moves, int opponent_player) {
-        return oracle.analyze_game(moves, static_cast<Player>(opponent_player));
-    };
-    bool load_uci_dataset(const std::string& filepath) {
-        return oracle.load_uci_dataset(filepath);
-    };
-private:
-    Oracle oracle;
+    Connect4Solver solver;
 };
 
 // Play game function wrapper
@@ -229,17 +204,9 @@ PYBIND11_MODULE(connect4_core, m) {
 
     py::class_<PyGameState>(m, "GameState")
         .def(py::init<>())
-        .def("to_list_representation", &PyGameState::to_list_representation)
-        .def_static("from_list_representation", &PyGameState::from_list_representation)
-        .def_static("initial_state", &PyGameState::initial_state)
-        .def_property_readonly("heights", [](const PyGameState& self) {
-        std::array<int, GAME_COLS> heights;
-        const GameState& state = self.get_state();
-        for (int i = 0; i < GAME_COLS; ++i) {
-            heights[i] = state.heights[i];
-        }
-        return heights;
-            });
+        .def("make_move", &PyGameState::make_move,
+            py::arg("col"))
+        .def("get_possible_moves", &PyGameState::get_possible_moves);
 
     py::class_<PyMCTS>(m, "MCTS")
         .def(py::init<float>(), py::arg("c_puct") = 1.0f)
@@ -251,6 +218,12 @@ PYBIND11_MODULE(connect4_core, m) {
         .def("clear", &PyMCTS::clear)
         .def("size", &PyMCTS::size);
 
+    py::class_<PySolver>(m, "Solver")
+        .def(py::init<int>(), py::arg("tt_size") = 1 << 25)
+        .def("solve", &PySolver::solve,
+            py::arg("state"), py::arg("depth"))
+        .def("clear_cache", &PySolver::clear_cache);
+
     py::class_<PyNet>(m, "Net")
         .def(py::init<>())
         .def(py::init<const std::string&, const int, const std::string&>(),
@@ -260,43 +233,9 @@ PYBIND11_MODULE(connect4_core, m) {
         .def("forward", &PyNet::forward)
         .def("get_net", &PyNet::get_net);
 
-    py::class_<PyMinimaxPlayer>(m, "MinimaxPlayer")
-        .def(py::init<size_t>(),
-            py::arg("tt_size_mb") = 64)
-        .def("clear", &PyMinimaxPlayer::clear)
-        .def("find_best_move", &PyMinimaxPlayer::find_best_move,
-            py::arg("state"), py::arg("max_depth") = 42);
-
-    py::class_<AnalysisResult>(m, "AnalysisResult")
-        .def_readonly("forced", &AnalysisResult::forced)
-        .def_readonly("best_move", &AnalysisResult::best_move)
-        .def_readonly("good_move", &AnalysisResult::good_move)
-        .def_readonly("mistake", &AnalysisResult::mistake)
-        .def_readonly("blunder", &AnalysisResult::blunder)
-        .def_readonly("total", &AnalysisResult::total);
-
-    py::class_<PyOracle>(m, "Oracle")
-        .def(py::init<int>(),
-            py::arg("minimax_time_limit_ms") = 500)
-        .def("get_best_move", &PyOracle::get_best_move,
-            py::arg("state"))
-        .def("analyze_game", &PyOracle::analyze_game,
-            py::arg("moves"), py::arg("opponent_player"))
-        .def("load_uci_dataset", &PyOracle::load_uci_dataset,
-            py::arg("filepath"));
-
     m.def("play_game", &py_play_game,
         py::arg("mcts1"), py::arg("mcts2"), py::arg("net1"), py::arg("net2"),
         py::arg("steps_before_tau_0") = 10, py::arg("mcts_searches") = 40,
         py::arg("mcts_batch_size") = 32, py::arg("net1_plays_first") = std::nullopt,
         py::arg("device") = "cpu", py::arg("max_replay_size") = 5000);
-
-    m.def("make_move", [](const PyGameState& state, int col, int player) {
-        auto [new_state, won] = GameLogic::make_move(state.get_state(), col);
-        return std::make_pair(PyGameState(new_state), won);
-        }, py::arg("state"), py::arg("col"), py::arg("player"));
-
-    m.def("possible_moves", [](const PyGameState& state) {
-        return GameLogic::get_possible_moves(state.get_state());
-        }, py::arg("state"));
 }

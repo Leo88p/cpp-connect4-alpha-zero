@@ -19,14 +19,21 @@ namespace Connect4 {
     class MCTSNode {
     public:
         std::array<int, GAME_COLS> visit_count = { 0 };
-        std::array<float, GAME_COLS> value = { 0.0f };
-        std::array<float, GAME_COLS> value_avg = { 0.0f };
+        std::array<float, GAME_COLS> value_sum = { 0.0f };
         std::array<float, GAME_COLS> probs = { 0.0f };
 
         MCTSNode() = default;
         MCTSNode(const MCTSNode& other) = default; // Use default copy constructor
 
-        void reset();
+        inline float get_value_avg(int col) const {
+            return visit_count[col] > 0 ? value_sum[col] / static_cast<float>(visit_count[col]) : 0.0f;
+        }
+
+        void reset() {
+            std::fill(visit_count.begin(), visit_count.end(), 0);
+            std::fill(value_sum.begin(), value_sum.end(), 0.0f);
+            std::fill(probs.begin(), probs.end(), 0.0f);
+        }
     };
 
     class MCTS {

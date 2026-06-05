@@ -271,13 +271,10 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="minimax_player.cpp" />
-    <ClCompile Include="connect4_game.cpp" />
     <ClCompile Include="connect4_game.h" />
     <ClCompile Include="game_play.cpp" />
     <ClCompile Include="mcts.cpp" />
     <ClCompile Include="model.cpp" />
-    <ClCompile Include="oracle.cpp" />
     <ClCompile Include="python_bindings.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Converter|x64'">true</ExcludedFromBuild>
@@ -287,14 +284,15 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Converter|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='ToPython|x64'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="transportation_table.h" />
+    <ClCompile Include="zorbist_table.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="connect4_solver.h" />
     <ClInclude Include="game_play.h" />
     <ClInclude Include="mcts.h" />
-    <ClInclude Include="minimax_player.h" />
     <ClInclude Include="model.h" />
     <ClInclude Include="neural_worker.h" />
-    <ClInclude Include="oracle.h" />
     <ClInclude Include="utils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

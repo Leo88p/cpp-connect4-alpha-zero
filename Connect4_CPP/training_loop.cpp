@@ -31,12 +31,12 @@ namespace fs = std::filesystem;
 using namespace Connect4;
 
 // Hyperparameters - fixed for Connect4 AlphaZero
-int PLAY_EPISODES = 2048;
+int PLAY_EPISODES = 1024;
 int PARALLEL_GAMES = 256;
-int MCTS_SEARCHES = 32;
+int MCTS_SEARCHES = 20;
 int MCTS_BATCH_SIZE = 64;
 constexpr size_t REPLAY_BUFFER_SIZE = 1000000;
-float LEARNING_RATE = 0.02f;
+float LEARNING_RATE = 0.2f;
 constexpr float LEARNING_RATE_ADJUSTED_1 = 0.02f;
 constexpr float LEARNING_RATE_ADJUSTED_2 = 0.002f;
 constexpr int ADJUSTED_IDX_1 = 20;
@@ -45,7 +45,8 @@ constexpr int BATCH_SIZE = 2048;
 constexpr int TRAIN_ROUNDS = 30;
 constexpr size_t MIN_REPLAY_TO_TRAIN = 10;
 constexpr int STEPS_BEFORE_TAU_0 = 10;
-constexpr int NUM_BLOCKS = 10;
+constexpr int NUM_BLOCKS = 5;
+constexpr int NUM_FILTERS = 64;
 //constexpr int EVALUATION_ROUNDS = 500;
 //constexpr float WIN_RATIO = 0.52f;
 

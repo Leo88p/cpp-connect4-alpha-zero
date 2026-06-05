@@ -9,9 +9,6 @@
 #include "connect4_game.h"
 
 namespace Connect4 {
-
-    constexpr int NUM_FILTERS = 64;
-
     class ResidualBlockImpl : public torch::nn::Module {
     public:
         ResidualBlockImpl(int in_channels);
@@ -27,7 +24,7 @@ namespace Connect4 {
 
     class Connect4NetImpl : public torch::nn::Module {
     public:
-        Connect4NetImpl(int num_blocks = 5);
+        Connect4NetImpl(int num_blocks = 5, int num_filters = 64);
 
         std::pair<torch::Tensor, torch::Tensor> forward(torch::Tensor x);
 
