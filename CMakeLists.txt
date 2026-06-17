@@ -29,17 +29,19 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 # --- Source Files ---
-# Note: In strict production environments, it's better to explicitly list files 
-# rather than using GLOB, so CMake knows to reconfigure when new files are added.
-file(GLOB_RECURSE GAME_LOGIC_SOURCES 
-    "src/*.cpp" 
-    "src/*.h"
-)
-
-# Exclude entry points from the shared logic list
-list(REMOVE_ITEM GAME_LOGIC_SOURCES 
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/training_loop.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/test_connect4.cpp"
+set(GAME_LOGIC_SOURCES 
+    "src/connect4_game.h" 
+    "src/connect4_solver.h"
+    "src/game_play.h"
+    "src/mcts.h"
+    "src/model.h"
+    "src/neural_worker.h"
+    "src/transportation_table.h"
+    "src/utils.h"
+    "src/zorbist_table.h"
+    "src/game_play.cpp"
+    "src/mcts.cpp"
+    "src/model.cpp"
 )
 
 # -------------------------------------------------------------
