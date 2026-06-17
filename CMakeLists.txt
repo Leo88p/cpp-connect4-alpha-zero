@@ -1,11 +1,10 @@
-cmake_minimum_required(VERSION 3.21) # Bumped to 3.21 for $<TARGET_RUNTIME_DLLS>
+cmake_minimum_required(VERSION 3.21)
 project(Connect4_CPP LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- LibTorch Configuration ---
-set(LIBTORCH_DIR "D:/libtorch")
 set(CMAKE_PREFIX_PATH "${LIBTORCH_DIR}")
 set(CAFFE2_USE_CUDNN ON CACHE BOOL "Force cuDNN for Caffe2" FORCE)
 
@@ -27,6 +26,19 @@ FetchContent_Declare(
     GIT_TAG        v3.15.0
 )
 FetchContent_MakeAvailable(Catch2)
+
+# -------------------------------------------------------------
+# --- Python Bindings Configuration ---
+# -------------------------------------------------------------
+
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+
+FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG        v3.0.1
+)
+FetchContent_MakeAvailable(pybind11)
 
 # --- Source Files ---
 set(GAME_LOGIC_SOURCES 
@@ -152,4 +164,30 @@ copy_target_dlls(Connect4Tests)
 # Register tests with CTest
 catch_discover_tests(Connect4Tests
     TEST_SPECIFIC_ENV "PATH=${LIBTORCH_DIR}/lib;$ENV{PATH}"
+)
+
+# -------------------------------------------------------------
+# 3. Target: Python Bindings (connect4_core)
+# -------------------------------------------------------------
+# pybind11_add_module automatically handles Python linking and sets the correct 
+# extension suffix (.pyd on Windows, .so on Linux)
+pybind11_add_module(connect4_core 
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/python_bindings.cpp"
+    ${GAME_LOGIC_SOURCES}
+)
+
+target_link_libraries(connect4_core PRIVATE 
+    ${TORCH_LIBRARIES} 
+    tsl::robin_map
+)
+
+if(MSVC)
+    target_compile_options(connect4_core PRIVATE ${TORCH_CXX_FLAGS})
+endif()
+
+# Separate output directory for python bindings
+# On Windows, MODULE libraries (like .pyd) are treated as RUNTIME artifacts by CMake
+set_target_properties(connect4_core connect4_core  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/connect4_core"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/connect4_core"
 )

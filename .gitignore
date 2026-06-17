@@ -429,3 +429,6 @@ FodyWeavers.xsd
 *.msp
 saves
 *.rar
+
+#CMake
+out
