@@ -1,0 +1,7 @@
+# __init__.py.in
+try:
+    import torch
+except ImportError:
+    raise ImportError("connect4_core requires PyTorch!")
+
+from ._C import *

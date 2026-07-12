@@ -21,13 +21,6 @@ namespace Connect4 {
         }
     };
 
-    void MCTSNode::reset() {
-        std::fill(visit_count.begin(), visit_count.end(), 0);
-        std::fill(value.begin(), value.end(), 0.0f);
-        std::fill(value_avg.begin(), value_avg.end(), 0.0f);
-        std::fill(probs.begin(), probs.end(), 0.0f);
-    }
-
     MCTS::MCTS(float c_puct) : c_puct_(c_puct) {
         std::random_device rd;
         rng_.seed(rd());
@@ -78,7 +71,7 @@ namespace Connect4 {
 
         while (!is_leaf(cur_state)) {
             states.push_back(cur_state);
-            uint64_t cur_key = cur_state.to_key();
+            uint64_t cur_key = cur_state.hash_key;
 
             // Safe access: node must exist if !is_leaf()
             const auto& node = tree_.at(cur_key);
@@ -88,27 +81,26 @@ namespace Connect4 {
 
             std::array<float, GAME_COLS> score;
             const auto& probs = node.probs;
-            const auto& values_avg = node.value_avg;
             const auto& counts = node.visit_count;
 
             // Choose action via UCB (with optional Dirichlet noise at root)
-            if (cur_state.to_key() == root_state.to_key() && use_noise) {
+            if (cur_state.hash_key == root_state.hash_key && use_noise) {
                 for (int i = 0; i < GAME_COLS; ++i) {
-                    score[i] = values_avg[i] + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
+                    score[i] = node.get_value_avg(i) + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
                         total_sqrt / (1.0f + static_cast<float>(counts[i]));
                 }
             }
             else {
                 for (int i = 0; i < GAME_COLS; ++i) {
-                    score[i] = values_avg[i] + c_puct_ * probs[i] *
+                    score[i] = node.get_value_avg(i) + c_puct_ * probs[i] *
                         total_sqrt / (1.0f + static_cast<float>(counts[i]));
                 }
             }
 
             // Mask invalid actions
-            auto valid_moves = GameLogic::get_possible_moves(cur_state);
+            auto valid_moves = cur_state.get_possible_moves();
             std::vector<bool> valid_mask(GAME_COLS, false);
-            for (int move : valid_moves) valid_mask[move] = true;
+            for (int move = 0; move < valid_moves.count; move++) valid_mask[valid_moves.columns[move]] = true;
 
             int best_action = -1;
             float best_score = -std::numeric_limits<float>::infinity();
@@ -132,34 +124,33 @@ namespace Connect4 {
                 // Penalize the edge we're about to traverse
                 // Note: node is non-const reference because we need to modify it
                 auto& mutable_node = tree_[cur_key];  // Safe: node exists
-                mutable_node.value[best_action] -= VIRTUAL_LOSS;
+                mutable_node.value_sum[best_action] -= VIRTUAL_LOSS;
                 virtual_loss_path->emplace_back(cur_key, best_action);
             }
 
-            auto [new_state, won] = GameLogic::make_move(cur_state, best_action);
+            bool won = cur_state.make_move(best_action);
 
             if (won) {
                 value = -1.0f;  // Terminal win: -1 from opponent's perspective
-                return { value, new_state, static_cast<Player>(1 - static_cast<int>(cur_player)),
+                return { value, cur_state, static_cast<Player>(1 - static_cast<int>(cur_player)),
                          std::move(states), std::move(actions) };
             }
 
-            cur_state = new_state;
             cur_player = static_cast<Player>(1 - static_cast<int>(cur_player));
 
-            if (GameLogic::get_possible_moves(cur_state).empty()) {
+            if (cur_state.get_possible_moves().count == 0) {
                 value = 0.0f;  // Draw
                 return { value, cur_state, cur_player, std::move(states), std::move(actions) };
             }
         }
 
-        uint64_t leaf_key = cur_state.to_key();
+        uint64_t leaf_key = cur_state.hash_key;
         return { std::numeric_limits<float>::quiet_NaN(), cur_state, cur_player,
                  std::move(states), std::move(actions) };
     }
 
     bool MCTS::is_leaf(const GameState& state) const {
-        uint64_t key = state.to_key();
+        uint64_t key = state.hash_key;
         return tree_.find(key) == tree_.end();
     }
 
@@ -198,7 +189,7 @@ namespace Connect4 {
                         if (j < static_cast<int>(actions.size()) &&
                             actions[j] >= 0 && actions[j] < GAME_COLS) {
 
-                            uint64_t state_key = states[j].to_key();
+                            uint64_t state_key = states[j].hash_key;
                             if (tree_.find(state_key) == tree_.end()) {
                                 tree_[state_key] = MCTSNode();
                             }
@@ -208,15 +199,13 @@ namespace Connect4 {
                             if (!virtual_loss_path.empty() &&
                                 virtual_loss_path.back().first == state_key &&
                                 virtual_loss_path.back().second == actions[j]) {
-                                node.value[actions[j]] += VIRTUAL_LOSS;  // Undo penalty
+                                node.value_sum[actions[j]] += VIRTUAL_LOSS;  // Undo penalty
                                 virtual_loss_path.pop_back();
                             }
 
                             // Normal backup
                             node.visit_count[actions[j]]++;
-                            node.value[actions[j]] += cur_value;
-                            node.value_avg[actions[j]] = node.value[actions[j]] /
-                                static_cast<float>(node.visit_count[actions[j]]);
+                            node.value_sum[actions[j]] += cur_value;
 
                             cur_value = -cur_value;
                         }
@@ -224,7 +213,7 @@ namespace Connect4 {
                 }
                 else {
                     // === Non-terminal: queue for NN expansion ===
-                    uint64_t leaf_key = leaf_state.to_key();
+                    uint64_t leaf_key = leaf_state.hash_key;
                     pending_backups[leaf_key].emplace_back(
                         std::move(states), std::move(actions), std::move(virtual_loss_path));
 
@@ -255,22 +244,21 @@ namespace Connect4 {
                 // === Phase 3: Create nodes and backup ALL pending searches ===
                 for (size_t i = 0; i < expand_states.size(); ++i) {
                     const auto& leaf_state = expand_states[i];
-                    uint64_t leaf_key = leaf_state.to_key();
+                    uint64_t leaf_key = leaf_state.hash_key;
 
                     auto [probs, value] = futures[i].get();
 
                     // Create node if needed
                     if (tree_.find(leaf_key) == tree_.end()) {
                         MCTSNode node;
-                        auto valid_moves = GameLogic::get_possible_moves(leaf_state);
+                        auto valid_moves = leaf_state.get_possible_moves();
                         std::vector<bool> valid_mask(GAME_COLS, false);
-                        for (int move : valid_moves) valid_mask[move] = true;
+                        for (int move = 0; move < valid_moves.count; move++) valid_mask[valid_moves.columns[move]] = true;
 
                         for (int j = 0; j < GAME_COLS; ++j) {
                             node.probs[j] = valid_mask[j] ? probs[j] : 0.0f;
                             node.visit_count[j] = 0;
-                            node.value[j] = 0.0f;
-                            node.value_avg[j] = 0.0f;
+                            node.value_sum[j] = 0.0f;
                         }
 
                         float sum = std::accumulate(node.probs.begin(), node.probs.end(), 0.0f);
@@ -290,7 +278,7 @@ namespace Connect4 {
                                 if (j < static_cast<int>(actions.size()) &&
                                     actions[j] >= 0 && actions[j] < GAME_COLS) {
 
-                                    uint64_t state_key = states[j].to_key();
+                                    uint64_t state_key = states[j].hash_key;
                                     if (tree_.find(state_key) == tree_.end()) {
                                         tree_[state_key] = MCTSNode();
                                     }
@@ -300,15 +288,13 @@ namespace Connect4 {
                                     if (!vloss_path.empty() &&
                                         vloss_path.back().first == state_key &&
                                         vloss_path.back().second == actions[j]) {
-                                        node.value[actions[j]] += VIRTUAL_LOSS;
+                                        node.value_sum[actions[j]] += VIRTUAL_LOSS;
                                         vloss_path.pop_back();
                                     }
 
                                     // Normal backup
                                     node.visit_count[actions[j]]++;
-                                    node.value[actions[j]] += cur_value;
-                                    node.value_avg[actions[j]] = node.value[actions[j]] /
-                                        static_cast<float>(node.visit_count[actions[j]]);
+                                    node.value_sum[actions[j]] += cur_value;
 
                                     cur_value = -cur_value;
                                 }
@@ -325,7 +311,7 @@ namespace Connect4 {
                     for (auto& [states, actions, vloss_path] : backups) {
                         for (auto& [key, action] : vloss_path) {
                             if (tree_.find(key) != tree_.end()) {
-                                tree_[key].value[action] += VIRTUAL_LOSS;
+                                tree_[key].value_sum[action] += VIRTUAL_LOSS;
                             }
                         }
                     }
@@ -337,7 +323,7 @@ namespace Connect4 {
 
     std::pair<std::array<float, GAME_COLS>, std::array<float, GAME_COLS>>
         MCTS::get_policy_value(const GameState& state, float tau) const {
-        uint64_t state_key = state.to_key();
+        uint64_t state_key = state.hash_key;
         const auto& node = tree_.at(state_key);
 
         std::array<float, GAME_COLS> probs;
@@ -365,7 +351,7 @@ namespace Connect4 {
             }
         }
 
-        for (int i = 0; i < GAME_COLS; ++i) values[i] = node.value_avg[i];
+        for (int i = 0; i < GAME_COLS; ++i) values[i] = node.get_value_avg(i);
         return { probs, values };
     }
 

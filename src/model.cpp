@@ -31,22 +31,22 @@ namespace Connect4 {
         return torch::leaky_relu(x);
     }
 
-    Connect4NetImpl::Connect4NetImpl(int num_blocks) {
+    Connect4NetImpl::Connect4NetImpl(int num_blocks, int num_filters) {
         // Input shape: (2, 6, 7)
         conv_in = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(2, NUM_FILTERS, 3).padding(1)),
-            torch::nn::BatchNorm2d(NUM_FILTERS),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(2, num_filters, 3).padding(1)),
+            torch::nn::BatchNorm2d(num_filters),
             torch::nn::LeakyReLU()
         );
 
         // Initialize residual blocks
         for (int i = 0; i < num_blocks; i++) {
-            residual_blocks->push_back(ResidualBlock(NUM_FILTERS));
+            residual_blocks->push_back(ResidualBlock(num_filters));
         } 
 
         // Value head
         conv_val = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(NUM_FILTERS, 32, 1)),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(num_filters, 32, 1)),
             torch::nn::BatchNorm2d(32),
             torch::nn::LeakyReLU(),
             torch::nn::Flatten()
@@ -54,7 +54,7 @@ namespace Connect4 {
 
         // Policy head
         conv_policy = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(NUM_FILTERS, 2, 1)),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(num_filters, 2, 1)),
             torch::nn::BatchNorm2d(2),
             torch::nn::LeakyReLU(),
             torch::nn::Flatten()
@@ -67,7 +67,7 @@ namespace Connect4 {
         register_module("conv_policy", conv_policy);
 
         // Create dummy input to determine sizes
-        torch::Tensor dummy = torch::zeros({ 1, NUM_FILTERS, GAME_ROWS, GAME_COLS });
+        torch::Tensor dummy = torch::zeros({ 1, num_filters, GAME_ROWS, GAME_COLS });
 
         {
             torch::NoGradGuard no_grad;

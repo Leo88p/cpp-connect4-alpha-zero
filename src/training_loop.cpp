@@ -26,28 +26,10 @@
 #include "model.h"
 #include "utils.h"
 #include "game_play.h"
+#include "config.h"
 
 namespace fs = std::filesystem;
 using namespace Connect4;
-
-// Hyperparameters - fixed for Connect4 AlphaZero
-int PLAY_EPISODES = 2048;
-int PARALLEL_GAMES = 256;
-int MCTS_SEARCHES = 32;
-int MCTS_BATCH_SIZE = 64;
-constexpr size_t REPLAY_BUFFER_SIZE = 1000000;
-float LEARNING_RATE = 0.02f;
-constexpr float LEARNING_RATE_ADJUSTED_1 = 0.02f;
-constexpr float LEARNING_RATE_ADJUSTED_2 = 0.002f;
-constexpr int ADJUSTED_IDX_1 = 20;
-constexpr int ADJUSTED_IDX_2 = 100;
-constexpr int BATCH_SIZE = 2048;
-constexpr int TRAIN_ROUNDS = 30;
-constexpr size_t MIN_REPLAY_TO_TRAIN = 10;
-constexpr int STEPS_BEFORE_TAU_0 = 10;
-constexpr int NUM_BLOCKS = 10;
-//constexpr int EVALUATION_ROUNDS = 500;
-//constexpr float WIN_RATIO = 0.52f;
 
 // Global flag for termination handling
 std::atomic<bool> terminate_requested(false);
@@ -111,13 +93,6 @@ void signal_handler(int signal) {
 
         terminate_requested = true;
     }
-}
-
-void print_help() {
-    std::cout << "Usage: connect4_az -n <run_name> [--dev <device>] [--net <filename>]" << std::endl;
-    std::cout << "  -n, --name    Name of the run (required)" << std::endl;
-    std::cout << "  --dev         Device to use (cpu or cuda, default: cpu)" << std::endl;
-    std::cout << "  --net         Network file to load (optional)" << std::endl;
 }
 
 void save_model(Connect4Net& net, const std::string& path) {
@@ -184,9 +159,6 @@ void clear_replay_buffer(ReplayBuffer& buffer, float keep_ratio = 0.0f) {
 }
 
 int main(int argc, char** argv) {
-
-    std::mt19937_64 rng(42);  // Fixed seed for reproducibility, or use random_device
-    //Connect4::ZobristHash::init(rng);
     // In main(), create ONCE:
     torch::set_num_threads(1);        // Limit intra-op parallelism per forward
     torch::set_num_interop_threads(1); // Limit inter-op parallelism
@@ -195,56 +167,31 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);  // Ctrl+C
     std::signal(SIGTERM, signal_handler); // Termination request
 
-    // Parse command line arguments
-    std::string run_name;
-    std::string device_str = "cpu";
-    std::string net_to_load;
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "-n" || arg == "--name") {
-            if (i + 1 < argc) run_name = argv[++i];
-        }
-        else if (arg == "--dev") {
-            if (i + 1 < argc) device_str = argv[++i];
-        }
-        else if (arg == "--net") {
-            if (i + 1 < argc) net_to_load = argv[++i];
-        }
-        else if (arg == "--mcts") {
-            if (i + 1 < argc) MCTS_SEARCHES = std::stoi(argv[++i]);
-        }
-        else if (arg == "--batch") {
-            if (i + 1 < argc) MCTS_BATCH_SIZE = std::stoi(argv[++i]);
-        }
-        else if (arg == "--games") {
-            if (i + 1 < argc) PLAY_EPISODES = std::stoi(argv[++i]);
-        }
-        else if (arg == "--parallel") {
-            if (i + 1 < argc) PARALLEL_GAMES = std::stoi(argv[++i]);
-        }
-        else if (arg == "-h" || arg == "--help") {
-            print_help();
-            return 0;
-        }
+    std::string config_path = "config.txt";
+    if (argc > 1) {
+        config_path = argv[1]; // Usage: ./train my_custom_config.txt
     }
-    ThreadPool pool(PARALLEL_GAMES);  // Match your 12 cores
 
-    if (run_name.empty()) {
+    // 2. Load configuration
+    Config cfg;
+    cfg.loadFromFile(config_path);
+
+    ThreadPool pool(cfg.parallel_games);
+
+    if (cfg.run_name.empty()) {
         std::cerr << "Error: --name argument is required" << std::endl;
-        print_help();
         return 1;
     }
 
-    std::cout << "Starting training with name: " << run_name << std::endl;
-    std::cout << "Device: " << device_str << std::endl;
+    std::cout << "Starting training with name: " << cfg.run_name << std::endl;
+    std::cout << "Device: " << cfg.device_str << std::endl;
 
-    if (!net_to_load.empty()) {
-        std::cout << "Loading network from: " << net_to_load << std::endl;
+    if (!cfg.net_to_load.empty()) {
+        std::cout << "Loading network from: " << cfg.net_to_load << std::endl;
     }
 
-    torch::Device device(device_str);
-    fs::path saves_path = fs::path("saves") / run_name;
+    torch::Device device(cfg.device_str);
+    fs::path saves_path = fs::path("saves") / cfg.run_name;
     fs::create_directories(saves_path);
 
     // Setup CSV logging
@@ -253,11 +200,11 @@ int main(int argc, char** argv) {
     CSVLogger csv_logger((logs_path / "metrics.csv").string());
 
     // Initialize network
-    Connect4Net net = std::make_shared<Connect4NetImpl>(NUM_BLOCKS);
+    Connect4Net net = std::make_shared<Connect4NetImpl>(cfg.num_blocks, cfg.num_filters);
     net->to(device);  // Ensure network is on the correct device from the start
 
-    if (!net_to_load.empty()) {
-        fs::path net_path = saves_path / net_to_load;
+    if (!cfg.net_to_load.empty()) {
+        fs::path net_path = saves_path / cfg.net_to_load;
         if (fs::exists(net_path)) {
             std::cout << "Loading network weights from " << net_path.string() << std::endl;
             try {
@@ -286,7 +233,7 @@ int main(int argc, char** argv) {
     // Print network architecture
     std::cout << *net << std::endl;
 
-    torch::optim::SGDOptions sgd_opts = torch::optim::SGDOptions(LEARNING_RATE).momentum(0.9).weight_decay(1e-4);
+    torch::optim::SGDOptions sgd_opts = torch::optim::SGDOptions(cfg.learning_rate).momentum(0.9).weight_decay(1e-4);
     torch::optim::SGD optimizer(net->parameters(), sgd_opts);
 
     // Replay buffer
@@ -298,10 +245,10 @@ int main(int argc, char** argv) {
     int steps_since_last_improvement = 0;
     float best_loss = std::numeric_limits<float>::max();
 
-    if (!net_to_load.empty()) {
+    if (!cfg.net_to_load.empty()) {
         try {
             // Parse step_idx and potentially mcts state from filename
-            std::string filename = net_to_load;
+            std::string filename = cfg.net_to_load;
             size_t underscore = filename.find('_');
             size_t dot = filename.find('.');
 
@@ -316,7 +263,7 @@ int main(int argc, char** argv) {
     }
 
     SimpleTracker tracker(csv_logger, 1);
-    //std::mt19937 rng(std::random_device{}());
+    std::mt19937 rng(std::random_device{}());
 
     // Training loop with termination handling
     while (!terminate_requested) {
@@ -327,11 +274,11 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, PARALLEL_GAMES);
+        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, cfg.parallel_games);
         net->eval(); 
         {
             torch::NoGradGuard no_grad;
-            std::vector<std::vector<MCTS>> all_mcts(PARALLEL_GAMES,
+            std::vector<std::vector<MCTS>> all_mcts(cfg.parallel_games,
                 std::vector<MCTS>(2, MCTS(1.0f)));
 
             for (auto& game_mcts : all_mcts) {
@@ -343,8 +290,8 @@ int main(int argc, char** argv) {
             // Мьютекс для защиты общего replay_buffer
             std::mutex replay_mutex;
 
-            for (int episode_start = 0; episode_start < PLAY_EPISODES && !terminate_requested; episode_start += PARALLEL_GAMES) {
-                int batch_games = std::min(PARALLEL_GAMES, PLAY_EPISODES - episode_start);
+            for (int episode_start = 0; episode_start < cfg.play_episodes && !terminate_requested; episode_start += cfg.parallel_games) {
+                int batch_games = std::min(cfg.parallel_games, cfg.play_episodes - episode_start);
 
                 // Вектор фьючерсов для асинхронных игр
                 std::vector<std::future<std::pair<int, int>>> futures;
@@ -359,7 +306,7 @@ int main(int argc, char** argv) {
                             auto [game_result, steps] = play_game(
                                 all_mcts[i], &local_buffers[i],
                                 net, net,
-                                STEPS_BEFORE_TAU_0, MCTS_SEARCHES, MCTS_BATCH_SIZE,
+                                cfg.steps_before_tau_0, cfg.mcts_batches, cfg.mcts_batch_size,
                                 std::nullopt, device
                             );
 
@@ -382,7 +329,7 @@ int main(int argc, char** argv) {
                     for (const auto& local_buffer : local_buffers) {
                         for (const auto& exp : local_buffer) {
                             replay_buffer.push_back(exp);
-                            if (replay_buffer.size() > REPLAY_BUFFER_SIZE) {
+                            if (replay_buffer.size() > cfg.replay_buffer_size) {
                                 replay_buffer.pop_front();
                             }
                         }
@@ -410,20 +357,29 @@ int main(int argc, char** argv) {
             << ", replay " << replay_buffer.size() << std::endl;
 
         step_idx++;
-        if (step_idx == ADJUSTED_IDX_1) {
-            LEARNING_RATE = LEARNING_RATE_ADJUSTED_1;
+        auto update_optimizer_lr = [&](float new_lr) {
+            for (auto& param_group : optimizer.param_groups()) {
+                static_cast<torch::optim::SGDOptions&>(param_group.options()).lr(new_lr);
+            }
+            std::cout << "[LR Decay] Learning rate adjusted to: " << new_lr << std::endl;
+            };
+
+        if (step_idx == cfg.adjusted_idx_1) {
+            cfg.learning_rate = cfg.learning_rate_adjusted_1;
+            update_optimizer_lr(cfg.learning_rate);
         }
-        if (step_idx == ADJUSTED_IDX_2) {
-            LEARNING_RATE = LEARNING_RATE_ADJUSTED_2;
+        if (step_idx == cfg.adjusted_idx_2) {
+            cfg.learning_rate = cfg.learning_rate_adjusted_2;
+            update_optimizer_lr(cfg.learning_rate);
         }
 
         // Check for termination after episodes
         if (terminate_requested) break;
 
         // Check if we have enough data to train
-        if (replay_buffer.size() < MIN_REPLAY_TO_TRAIN) {
+        if (replay_buffer.size() < cfg.min_replay_to_train) {
             std::cout << "Not enough samples in replay buffer. Waiting... ("
-                << replay_buffer.size() << "/" << MIN_REPLAY_TO_TRAIN << ")" << std::endl;
+                << replay_buffer.size() << "/" << cfg.min_replay_to_train << ")" << std::endl;
             continue;
         }
 
@@ -432,19 +388,19 @@ int main(int argc, char** argv) {
         float sum_value_loss = 0.0f;
         float sum_policy_loss = 0.0f;
 
-        for (int train_round = 0; train_round < TRAIN_ROUNDS && !terminate_requested; ++train_round) {
+        for (int train_round = 0; train_round < cfg.train_rounds && !terminate_requested; ++train_round) {
             // Sample batch from replay buffer with prioritized sampling
             std::vector<std::tuple<GameState, Player, std::array<float, GAME_COLS>, float>> batch;
-            batch.reserve(BATCH_SIZE);
+            batch.reserve(cfg.batch_size);
 
-            if (static_cast<int>(replay_buffer.size()) < BATCH_SIZE) {
+            if (static_cast<int>(replay_buffer.size()) < cfg.batch_size) {
                 std::cerr << "Warning: Replay buffer too small for batch size" << std::endl;
                 continue;
             }
 
             std::uniform_int_distribution<> dist(0, replay_buffer.size() - 1);
 
-            for (int i = 0; i < BATCH_SIZE; ++i) {
+            for (int i = 0; i < cfg.batch_size; ++i) {
                 size_t idx = dist(rng);
                 batch.push_back(replay_buffer[idx]);
             }
@@ -455,10 +411,10 @@ int main(int argc, char** argv) {
             std::vector<std::array<float, GAME_COLS>> batch_probs;
             std::vector<float> batch_values;
 
-            batch_states.reserve(BATCH_SIZE);
-            batch_who_moves.reserve(BATCH_SIZE);
-            batch_probs.reserve(BATCH_SIZE);
-            batch_values.reserve(BATCH_SIZE);
+            batch_states.reserve(cfg.batch_size);
+            batch_who_moves.reserve(cfg.batch_size);
+            batch_probs.reserve(cfg.batch_size);
+            batch_values.reserve(cfg.batch_size);
 
             for (const auto& [state, player, probs, value] : batch) {
                 batch_states.push_back(state);
@@ -488,17 +444,11 @@ int main(int argc, char** argv) {
             }
             // Convert to tensors
             auto states_v = state_lists_to_batch(batch_states, batch_who_moves, device);
-            //Test 1
-            /*std::cout << "Batch tensor stats: "
-                << "mean=" << states_v.mean().item<float>() << ", "
-                << "std=" << states_v.std().item<float>() << ", "
-                << "non-zero=" << (states_v != 0).sum().item<int64_t>() << std::endl;*/
-
             // Convert probs and values to tensors
-            torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(BATCH_SIZE), GAME_COLS }, torch::kFloat32);
-            torch::Tensor values_v = torch::zeros({ static_cast<int64_t>(BATCH_SIZE) }, torch::kFloat32);
+            torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size), GAME_COLS }, torch::kFloat32);
+            torch::Tensor values_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size) }, torch::kFloat32);
 
-            for (int i = 0; i < BATCH_SIZE; ++i) {
+            for (int i = 0; i < cfg.batch_size; ++i) {
                 for (int j = 0; j < GAME_COLS; ++j) {
                     probs_v[i][j] = batch_probs[i][j];
                 }
@@ -523,16 +473,7 @@ int main(int argc, char** argv) {
 
 
             auto loss_v = loss_policy_v + loss_value_v;
-            // Backward pass
             loss_v.backward();
-            //Test 2
-            /*float total_norm = 0.0f;
-            for (const auto& p : net->parameters()) {
-                if (p.grad().defined()) {
-                    total_norm += p.grad().norm().item<float>();
-                }
-            }
-            std::cout << "Gradient norm: " << total_norm << std::endl; */
 
             torch::nn::utils::clip_grad_norm_(net->parameters(), 1.0);
             optimizer.step();
@@ -542,9 +483,9 @@ int main(int argc, char** argv) {
             sum_policy_loss += loss_policy_v.item<float>();
         }
 
-        tracker.track("loss_total", sum_loss / TRAIN_ROUNDS, step_idx);
-        tracker.track("loss_value", sum_value_loss / TRAIN_ROUNDS, step_idx);
-        tracker.track("loss_policy", sum_policy_loss / TRAIN_ROUNDS, step_idx);
+        tracker.track("loss_total", sum_loss / cfg.train_rounds, step_idx);
+        tracker.track("loss_value", sum_value_loss / cfg.train_rounds, step_idx);
+        tracker.track("loss_policy", sum_policy_loss / cfg.train_rounds, step_idx);
 
         // Check for termination after training phase
         if (terminate_requested) break;
