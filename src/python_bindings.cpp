@@ -1,10 +1,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <torch/torch.h>
 
 #include "connect4_game.h"
-#include "connect4_solver.h"
 #include "mcts.h"
 #include "model.h"
 #include "game_play.h"
@@ -32,8 +30,8 @@ private:
 class PyNet {
 public:
     PyNet() : net(std::make_shared<Connect4NetImpl>()) {}
-    PyNet(const std::string& path, const int blocks, const std::string& device_str = "cpu")
-        : net(std::make_shared<Connect4NetImpl>(blocks)) {
+    PyNet(const std::string& path, const int blocks, const int filters, const std::string& device_str = "cpu")
+        : net(std::make_shared<Connect4NetImpl>(blocks, filters)) {
         load(path, device_str);
         net->eval();
         torch::NoGradGuard no_grad;
@@ -154,17 +152,6 @@ private:
     std::unique_ptr<Connect4::NeuralWorker> neural_worker_ = nullptr;
 };
 
-class PySolver {
-public:
-    PySolver(size_t tt_size) : solver(tt_size) {}
-    std::pair<int, int8_t> solve(PyGameState& state, int depth) {
-        return solver.solve(state.get_state(), depth);
-    }
-    void clear_cache() { solver.clear_cache(); }
-private:
-    Connect4Solver solver;
-};
-
 // Play game function wrapper
 std::tuple<std::vector<std::tuple<int, int, float>>, float, int, bool>
 py_play_game(PyMCTS& mcts1, PyMCTS& mcts2, PyNet& net1, PyNet& net2,
@@ -195,7 +182,7 @@ py_play_game(PyMCTS& mcts1, PyMCTS& mcts2, PyNet& net1, PyNet& net2,
 
 // Module definition
 // Module definition
-PYBIND11_MODULE(connect4_core, m) {
+PYBIND11_MODULE(_C, m) {
     m.doc() = "Connect4 AlphaZero C++ core with high-performance simulation";
 
     m.attr("GAME_ROWS") = GAME_ROWS;
@@ -218,16 +205,10 @@ PYBIND11_MODULE(connect4_core, m) {
         .def("clear", &PyMCTS::clear)
         .def("size", &PyMCTS::size);
 
-    py::class_<PySolver>(m, "Solver")
-        .def(py::init<int>(), py::arg("tt_size") = 1 << 25)
-        .def("solve", &PySolver::solve,
-            py::arg("state"), py::arg("depth"))
-        .def("clear_cache", &PySolver::clear_cache);
-
     py::class_<PyNet>(m, "Net")
         .def(py::init<>())
-        .def(py::init<const std::string&, const int, const std::string&>(),
-            py::arg("path"), py::arg("blocks"), py::arg("device") = "cpu")
+        .def(py::init<const std::string&, const int, const int, const std::string&>(),
+            py::arg("path"), py::arg("blocks"), py::arg("filters"), py::arg("device") = "cpu")
         .def("load", &PyNet::load,
             py::arg("path"), py::arg("device") = "cpu")
         .def("forward", &PyNet::forward)

@@ -1,6 +1,6 @@
 #pragma once
 #include <array>
-#include "zorbist_table.h"
+#include "zobrist_table.h"
 
 namespace Connect4 {
 
@@ -61,22 +61,21 @@ namespace Connect4 {
         void unmake_move(int col) {
             uint64_t column_mask = 0x7FULL << (col * 7);
             uint64_t occupied_in_col = get_occupied() & column_mask;
-            if (occupied_in_col == 0) return; // Safety check
+            if (occupied_in_col == 0) return;
 
             unsigned long bit_index;
-            _BitScanReverse64(&bit_index, occupied_in_col); // Find the TOP-MOST piece
+            _BitScanReverse64(&bit_index, occupied_in_col);
             uint64_t move_bit = 1ULL << bit_index;
 
-            // Flip player back to the one who made the move
             current_player = (current_player == Player::BLACK) ? Player::WHITE : Player::BLACK;
 
             if (current_player == Player::BLACK) {
                 black_pieces &= ~move_bit;
-                hash_key ^= ZOBRIST.table[bit_index][0];
+                hash_key ^= ZOBRIST.table[bit_index][0]; // <--- USE bit_index DIRECTLY
             }
             else {
                 white_pieces &= ~move_bit;
-                hash_key ^= ZOBRIST.table[bit_index][1];
+                hash_key ^= ZOBRIST.table[bit_index][1]; // <--- USE bit_index DIRECTLY
             }
             hash_key ^= ZOBRIST.black_turn_key;
         }
@@ -109,7 +108,12 @@ namespace Connect4 {
     };
 
     inline constexpr GameState get_initial_state() {
-        return GameState{ 0, 0, Player::BLACK };
+        GameState state;
+        state.black_pieces = 0;
+        state.white_pieces = 0;
+        state.current_player = Player::BLACK;
+        state.hash_key = ZOBRIST.black_turn_key;
+        return state;
     }
 
 } // namespace Connect4

@@ -43,14 +43,12 @@ FetchContent_MakeAvailable(pybind11)
 # --- Source Files ---
 set(GAME_LOGIC_SOURCES 
     "src/connect4_game.h" 
-    "src/connect4_solver.h"
     "src/game_play.h"
     "src/mcts.h"
     "src/model.h"
     "src/neural_worker.h"
-    "src/transportation_table.h"
     "src/utils.h"
-    "src/zorbist_table.h"
+    "src/zobrist_table.h"
     "src/game_play.cpp"
     "src/mcts.cpp"
     "src/model.cpp"
@@ -130,6 +128,12 @@ set_target_properties(Connect4AlphaZero PROPERTIES
 # Apply the DLL copy logic to the main app
 copy_target_dlls(Connect4AlphaZero)
 
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/config.txt"
+    "${CMAKE_BINARY_DIR}/bin/main/config.txt"
+    COPYONLY
+)
+
 # -------------------------------------------------------------
 # 2. Target: Tests
 # -------------------------------------------------------------
@@ -171,23 +175,29 @@ catch_discover_tests(Connect4Tests
 # -------------------------------------------------------------
 # pybind11_add_module automatically handles Python linking and sets the correct 
 # extension suffix (.pyd on Windows, .so on Linux)
-pybind11_add_module(connect4_core 
+pybind11_add_module(_C 
     "${CMAKE_CURRENT_SOURCE_DIR}/src/python_bindings.cpp"
     ${GAME_LOGIC_SOURCES}
 )
 
-target_link_libraries(connect4_core PRIVATE 
+target_link_libraries(_C PRIVATE 
     ${TORCH_LIBRARIES} 
     tsl::robin_map
 )
 
 if(MSVC)
-    target_compile_options(connect4_core PRIVATE ${TORCH_CXX_FLAGS})
+    target_compile_options(_C PRIVATE ${TORCH_CXX_FLAGS})
 endif()
 
 # Separate output directory for python bindings
 # On Windows, MODULE libraries (like .pyd) are treated as RUNTIME artifacts by CMake
-set_target_properties(connect4_core connect4_core  PROPERTIES
+set_target_properties(_C  PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/connect4_core"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/connect4_core"
+)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in"
+    "${CMAKE_BINARY_DIR}/bin/connect4_core/__init__.py"
+    COPYONLY
 )

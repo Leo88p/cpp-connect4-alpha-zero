@@ -122,11 +122,21 @@ namespace Connect4 {
                 // 2. Recompute the Zobrist hash for the flipped state
                 // (Required so MCTS and TT recognize this state correctly)
                 flipped.hash_key = 0;
-                for (int i = 0; i < 42; ++i) {
-                    if (new_black & (1ULL << i)) flipped.hash_key ^= ZOBRIST.table[i][0];
-                    if (new_white & (1ULL << i)) flipped.hash_key ^= ZOBRIST.table[i][1];
+
+                // Iterate over the 49 physical bits used by the bitboard
+                for (int col = 0; col < 7; ++col) {
+                    for (int row = 0; row < 6; ++row) { // Only 6 rows are playable
+                        int bit_index = col * 7 + row;  // This gives 0..48
+
+                        if (new_black & (1ULL << bit_index)) {
+                            flipped.hash_key ^= ZOBRIST.table[bit_index][0];
+                        }
+                        if (new_white & (1ULL << bit_index)) {
+                            flipped.hash_key ^= ZOBRIST.table[bit_index][1];
+                        }
+                    }
                 }
-                // Add the turn key if it's Black's turn (based on your make_move logic)
+
                 if (flipped.current_player == Player::BLACK) {
                     flipped.hash_key ^= ZOBRIST.black_turn_key;
                 }
