@@ -43,8 +43,8 @@ namespace Connect4 {
     TORCH_MODULE(Connect4Net);
 
     // Function to convert game states to batch tensor
-    torch::Tensor state_lists_to_batch(const std::vector<GameState>& states,
-        const std::vector<Player>& who_moves,
-        const torch::Device& device = torch::kCPU);
+    void state_lists_to_batches(torch::Tensor& cpu_buffer,
+        const std::vector<GameState>& states,
+        const std::vector<Player>& who_moves);
 
 } // namespace Connect4

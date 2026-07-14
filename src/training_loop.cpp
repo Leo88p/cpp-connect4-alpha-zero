@@ -287,15 +287,12 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Мьютекс для защиты общего replay_buffer
             std::mutex replay_mutex;
 
             for (int episode_start = 0; episode_start < cfg.play_episodes && !terminate_requested; episode_start += cfg.parallel_games) {
                 int batch_games = std::min(cfg.parallel_games, cfg.play_episodes - episode_start);
 
-                // Вектор фьючерсов для асинхронных игр
                 std::vector<std::future<std::pair<int, int>>> futures;
-                // Вектор локальных буферов (каждый для своей игры)
                 std::vector<std::vector<ReplayBuffer::value_type>> local_buffers(batch_games);
 
                 for (int i = 0; i < batch_games; ++i) {
@@ -316,14 +313,12 @@ int main(int argc, char** argv) {
                     ));
                 }
 
-                // Собираем результаты
                 for (int i = 0; i < batch_games; ++i) {
                     auto [steps, leaves] = futures[i].get();
                     game_steps += steps;
                     total_leaves += leaves;
                 }
 
-                // Сливаем локальные буферы в общий (под мьютексом)
                 {
                     std::lock_guard<std::mutex> lock(replay_mutex);
                     for (const auto& local_buffer : local_buffers) {
@@ -443,7 +438,10 @@ int main(int argc, char** argv) {
                 std::cout << "Avg policy target entropy: " << avg_entropy << std::endl;
             }
             // Convert to tensors
-            auto states_v = state_lists_to_batch(batch_states, batch_who_moves, device);
+            auto states_v = torch::empty(
+                { cfg.batch_size, 2, GAME_ROWS, GAME_COLS },
+                torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
+            state_lists_to_batches(states_v, batch_states, batch_who_moves);
             // Convert probs and values to tensors
             torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size), GAME_COLS }, torch::kFloat32);
             torch::Tensor values_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size) }, torch::kFloat32);
@@ -455,6 +453,7 @@ int main(int argc, char** argv) {
                 values_v[i] = batch_values[i];
             }
 
+            states_v = states_v.to(device);
             probs_v = probs_v.to(device);
             values_v = values_v.to(device);
 

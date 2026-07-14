@@ -113,50 +113,42 @@ namespace Connect4 {
         return { pol, val };
     }
 
-    torch::Tensor state_lists_to_batch(const std::vector<GameState>& states,
-        const std::vector<Player>& who_moves,
-        const torch::Device& device) {
+    void state_lists_to_batches(torch::Tensor& cpu_buffer,
+        const std::vector<GameState>& states,
+        const std::vector<Player>& who_moves) {
+        TORCH_CHECK(cpu_buffer.device().is_cpu(), "fill_batch_buffer requires a CPU tensor");
+        TORCH_CHECK(cpu_buffer.is_contiguous(), "Buffer must be contiguous");
 
-        size_t batch_size = states.size();
+        float* ptr = cpu_buffer.data_ptr<float>();
+        const int channel_stride = GAME_ROWS * GAME_COLS; // 6*7 = 42
+        const int sample_stride = 2 * channel_stride;
 
-        // Pre-allocate on CPU first (faster than direct CUDA allocation)
-        torch::Tensor batch = torch::zeros({ static_cast<int64_t>(batch_size), 2, GAME_ROWS, GAME_COLS },
-            torch::dtype(torch::kFloat32).device(torch::kCPU));
-        auto batch_accessor = batch.accessor<float, 4>();
-
-        for (size_t idx = 0; idx < batch_size; ++idx) {
+        for (size_t idx = 0; idx < states.size(); ++idx) {
             const auto& state = states[idx];
             Player who_move = who_moves[idx];
 
-            // Determine which channel is "us" vs "them"
             int our_channel = (who_move == Player::BLACK) ? 0 : 1;
             int their_channel = 1 - our_channel;
 
-            // Direct bit iteration (no nested row/col loops!)
             uint64_t our_pieces = (who_move == Player::BLACK) ? state.black_pieces : state.white_pieces;
             uint64_t their_pieces = (who_move == Player::BLACK) ? state.white_pieces : state.black_pieces;
 
-            // Unroll the 42 positions directly
+            float* our_plane = ptr + idx * sample_stride + our_channel * channel_stride;
+            float* their_plane = ptr + idx * sample_stride + their_channel * channel_stride;
+
+            // Zero out planes (CPU-safe)
+            std::memset(our_plane, 0, channel_stride * sizeof(float));
+            std::memset(their_plane, 0, channel_stride * sizeof(float));
+
             for (int pos = 0; pos < 42; ++pos) {
                 int row = pos / 7;
                 int col = pos % 7;
-                int tensor_row = GAME_ROWS - 1 - row;  // Flip vertically
+                int tensor_idx = (GAME_ROWS - 1 - row) * GAME_COLS + col; // Flip vertically
 
-                if (our_pieces & (1ULL << pos)) {
-                    batch_accessor[idx][our_channel][tensor_row][col] = 1.0f;
-                }
-                if (their_pieces & (1ULL << pos)) {
-                    batch_accessor[idx][their_channel][tensor_row][col] = 1.0f;
-                }
+                if (our_pieces & (1ULL << pos))   our_plane[tensor_idx] = 1.0f;
+                if (their_pieces & (1ULL << pos)) their_plane[tensor_idx] = 1.0f;
             }
         }
-
-        // Copy to GPU only once at the end (if needed)
-        if (device.is_cuda()) {
-            batch = batch.to(device);
-        }
-
-        return batch;
     }
 
 } // namespace Connect4

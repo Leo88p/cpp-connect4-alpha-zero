@@ -23,43 +23,6 @@ namespace Connect4 {
         Player player;
         std::promise<std::pair<std::array<float, GAME_COLS>, float>> promise;
     };
-    inline void fill_batch_buffer(torch::Tensor& cpu_buffer,
-        const std::vector<GameState>& states,
-        const std::vector<Player>& who_moves) {
-        TORCH_CHECK(cpu_buffer.device().is_cpu(), "fill_batch_buffer requires a CPU tensor");
-        TORCH_CHECK(cpu_buffer.is_contiguous(), "Buffer must be contiguous");
-
-        float* ptr = cpu_buffer.data_ptr<float>();
-        const int channel_stride = GAME_ROWS * GAME_COLS; // 6*7 = 42
-        const int sample_stride = 2 * channel_stride;
-
-        for (size_t idx = 0; idx < states.size(); ++idx) {
-            const auto& state = states[idx];
-            Player who_move = who_moves[idx];
-
-            int our_channel = (who_move == Player::BLACK) ? 0 : 1;
-            int their_channel = 1 - our_channel;
-
-            uint64_t our_pieces = (who_move == Player::BLACK) ? state.black_pieces : state.white_pieces;
-            uint64_t their_pieces = (who_move == Player::BLACK) ? state.white_pieces : state.black_pieces;
-
-            float* our_plane = ptr + idx * sample_stride + our_channel * channel_stride;
-            float* their_plane = ptr + idx * sample_stride + their_channel * channel_stride;
-
-            // Zero out planes (CPU-safe)
-            std::memset(our_plane, 0, channel_stride * sizeof(float));
-            std::memset(their_plane, 0, channel_stride * sizeof(float));
-
-            for (int pos = 0; pos < 42; ++pos) {
-                int row = pos / 7;
-                int col = pos % 7;
-                int tensor_idx = (GAME_ROWS - 1 - row) * GAME_COLS + col; // Flip vertically
-
-                if (our_pieces & (1ULL << pos))   our_plane[tensor_idx] = 1.0f;
-                if (their_pieces & (1ULL << pos)) their_plane[tensor_idx] = 1.0f;
-            }
-        }
-    }
     class NeuralWorker {
         std::queue<NeuralQuery> queue_;
         std::mutex mutex_;
@@ -173,7 +136,7 @@ namespace Connect4 {
                     c10::cuda::CUDAStreamGuard guard(stream_);
 
                     // 1. Fill CPU staging buffer (fast, no GPU access violations)
-                    fill_batch_buffer(cpu_staging_buffer_, states, players);
+                    state_lists_to_batches(cpu_staging_buffer_, states, players);
 
                     // 2. Async Host-to-Device copy
                     cudaMemcpyAsync(gpu_input_buffer_.data_ptr<float>(),
@@ -212,24 +175,6 @@ namespace Connect4 {
                         std::array<float, GAME_COLS> probs;
                         std::memcpy(probs.data(), probs_ptr + i * GAME_COLS, GAME_COLS * sizeof(float));
                         batch[i].promise.set_value({ probs, values_ptr[i] });
-                    }
-                }
-                // === CPU FALLBACK PATH (for testing/debugging) ===
-                else {
-                    auto states_v = state_lists_to_batch(states, players, device_);
-                    torch::NoGradGuard no_grad;
-                    auto output = net_->forward(states_v);
-
-                    auto probs_v = torch::softmax(std::get<0>(output), 1).cpu();
-                    auto values_v = std::get<1>(output).cpu();
-
-                    auto probs_acc = probs_v.accessor<float, 2>();
-                    auto values_acc = values_v.accessor<float, 2>();
-
-                    for (size_t i = 0; i < batch.size(); ++i) {
-                        std::array<float, GAME_COLS> probs;
-                        std::memcpy(probs.data(), probs_acc[i].data(), GAME_COLS * sizeof(float));
-                        batch[i].promise.set_value({ probs, values_acc[i][0] });
                     }
                 }
             }
