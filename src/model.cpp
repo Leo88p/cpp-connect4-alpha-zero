@@ -127,8 +127,8 @@ namespace Connect4 {
             const auto& state = states[idx];
             Player who_move = who_moves[idx];
 
-            int our_channel = (who_move == Player::BLACK) ? 0 : 1;
-            int their_channel = 1 - our_channel;
+            int our_channel = 0;
+            int their_channel = 1;
 
             uint64_t our_pieces = (who_move == Player::BLACK) ? state.black_pieces : state.white_pieces;
             uint64_t their_pieces = (who_move == Player::BLACK) ? state.white_pieces : state.black_pieces;
