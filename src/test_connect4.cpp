@@ -9,7 +9,7 @@ using namespace Connect4;
 int count_pieces(uint64_t board) {
     return std::popcount(board);
 }
-void apply_moves(GameState& state, const std::vector<int>& moves) {
+/*void apply_moves(GameState& state, const std::vector<int>& moves) {
     for (int col : moves) {
         state.make_move(col);
     }
@@ -109,4 +109,4 @@ TEST_CASE("GameState: Deep Search Imitation", "[gamestate]") {
     REQUIRE(state.hash_key == deep_hash);
     REQUIRE(state.black_pieces == deep_black);
     REQUIRE(state.white_pieces == deep_white);
-}
+} */

@@ -43,6 +43,7 @@ FetchContent_MakeAvailable(pybind11)
 # --- Source Files ---
 set(GAME_LOGIC_SOURCES 
     "src/connect4_game.h" 
+    "src/connect4_game.cpp" 
     "src/game_play.h"
     "src/mcts.h"
     "src/model.h"

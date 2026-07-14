@@ -14,16 +14,20 @@ using namespace Connect4;
 // Wrapper class for GameState to expose to Python
 class PyGameState {
 public:
-    PyGameState() : state(GameState()) {}
+    PyGameState() : state(GameLogic::INITIAL_STATE) {}
     PyGameState(const GameState& s) : state(s) {}
 
-    GameState& get_state() { return state; }
-    GameState get_state() const { return state; }
-    bool make_move(int col) { return state.make_move(col); }
-    std::array<int, GAME_COLS> get_possible_moves() { return state.get_possible_moves().columns; }
+    std::vector<std::vector<int>> to_list_representation() const {
+        return GameLogic::to_list_representation(state);
+    }
 
+    static PyGameState initial_state() {
+        return PyGameState(GameLogic::INITIAL_STATE);
+    }
+
+    GameState get_state() const { return state; }
 private:
-    GameState state;
+        GameState state;
 };
 
 // Wrapper for Neural Network
@@ -191,9 +195,16 @@ PYBIND11_MODULE(_C, m) {
 
     py::class_<PyGameState>(m, "GameState")
         .def(py::init<>())
-        .def("make_move", &PyGameState::make_move,
-            py::arg("col"))
-        .def("get_possible_moves", &PyGameState::get_possible_moves);
+        .def("to_list_representation", &PyGameState::to_list_representation)
+        .def_static("initial_state", &PyGameState::initial_state)
+        .def_property_readonly("heights", [](const PyGameState& self) {
+        std::array<int, GAME_COLS> heights;
+        const GameState& state = self.get_state();
+        for (int i = 0; i < GAME_COLS; ++i) {
+            heights[i] = state.heights[i];
+        }
+        return heights;
+            });
 
     py::class_<PyMCTS>(m, "MCTS")
         .def(py::init<float>(), py::arg("c_puct") = 1.0f)
@@ -219,4 +230,13 @@ PYBIND11_MODULE(_C, m) {
         py::arg("steps_before_tau_0") = 10, py::arg("mcts_searches") = 40,
         py::arg("mcts_batch_size") = 32, py::arg("net1_plays_first") = std::nullopt,
         py::arg("device") = "cpu", py::arg("max_replay_size") = 5000);
+
+    m.def("make_move", [](const PyGameState& state, int col, int player) {
+        auto [new_state, won] = GameLogic::make_move(state.get_state(), col);
+        return std::make_pair(PyGameState(new_state), won);
+        }, py::arg("state"), py::arg("col"), py::arg("player"));
+
+    m.def("possible_moves", [](const PyGameState& state) {
+        return GameLogic::get_possible_moves(state.get_state());
+        }, py::arg("state"));
 }
