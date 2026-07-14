@@ -31,8 +31,8 @@ namespace Connect4 {
 
     class MCTS {
     public:
-        explicit MCTS(float c_puct = 1.0f);
-        MCTS(const MCTS& other); // Proper copy constructor
+        explicit MCTS(float c_puct = 1.0f, float c_fpu = 0.25f, float virtual_loss = 2.0f);
+        
         bool use_noise = true;
 
         void clear();
@@ -59,6 +59,9 @@ namespace Connect4 {
 
     private:
         float c_puct_;
+        float c_fpu_;
+        float virtual_loss_;
+
         tsl::robin_map<uint64_t, MCTSNode> tree_;
 
         // Random number generation for Dirichlet noise

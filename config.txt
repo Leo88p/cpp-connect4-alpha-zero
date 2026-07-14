@@ -9,6 +9,8 @@ parallel_games = 64
 mcts_batches = 20
 mcts_batch_size = 64
 steps_before_tau_0 = 10
+virtual_loss = 2
+c_puct = 1
 
 # --- Training Settings ---
 batch_size = 1024

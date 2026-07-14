@@ -279,7 +279,7 @@ int main(int argc, char** argv) {
         {
             torch::NoGradGuard no_grad;
             std::vector<std::vector<MCTS>> all_mcts(cfg.parallel_games,
-                std::vector<MCTS>(2, MCTS(1.0f)));
+                std::vector<MCTS>(2, MCTS(cfg.c_puct, cfg.c_fpu, cfg.virtual_loss)));
 
             for (auto& game_mcts : all_mcts) {
                 for (auto& mcts : game_mcts) {

@@ -5,8 +5,6 @@
 
 namespace Connect4 {
 
-    // === VIRTUAL LOSS CONFIGURATION ===
-    constexpr float VIRTUAL_LOSS = 2.0f;  // Typical range: 1.0–3.0
 
     // Helper struct to bundle backup data + virtual loss path
     struct BackupEntry {
@@ -28,20 +26,11 @@ namespace Connect4 {
         std::fill(probs.begin(), probs.end(), 0.0f);
     }
 
-    MCTS::MCTS(float c_puct) : c_puct_(c_puct) {
+    MCTS::MCTS(float c_puct, float c_fpu, float virtual_loss) : c_puct_(c_puct), c_fpu_(c_fpu), virtual_loss_(virtual_loss){
         std::random_device rd;
         rng_.seed(rd());
         dirichlet_dist_ = std::gamma_distribution<float>(0.3f, 1.0f);
         tree_.reserve(10000);
-    }
-
-    MCTS::MCTS(const MCTS& other)
-        : c_puct_(other.c_puct_),
-        tree_(other.tree_),
-        rng_(other.rng_),
-        dirichlet_dist_(other.dirichlet_dist_) {
-        std::random_device rd;
-        rng_.seed(rd());
     }
 
     void MCTS::clear() {
@@ -132,7 +121,7 @@ namespace Connect4 {
                 // Penalize the edge we're about to traverse
                 // Note: node is non-const reference because we need to modify it
                 auto& mutable_node = tree_[cur_key];  // Safe: node exists
-                mutable_node.value[best_action] -= VIRTUAL_LOSS;
+                mutable_node.value[best_action] -= virtual_loss_;
                 virtual_loss_path->emplace_back(cur_key, best_action);
             }
 
@@ -165,6 +154,7 @@ namespace Connect4 {
 
     void MCTS::search_batch(int count, int batch_size, const GameState& state,
         Player player, Connect4Net& net, const torch::Device& device) {
+        if (use_noise) dirichlet_noise = generate_dirichlet_noise();
         for (int i = 0; i < count; ++i) {
             search_minibatch(batch_size, state, player, net, device);
         }
@@ -181,7 +171,6 @@ namespace Connect4 {
         // === Phase 1: Find leaves with virtual loss ===
         for (int i = 0; i < count; ++i) {
             try {
-                dirichlet_noise = generate_dirichlet_noise();
 
                 // Track virtual loss path for this search
                 std::vector<std::pair<uint64_t, int>> virtual_loss_path;
@@ -208,7 +197,7 @@ namespace Connect4 {
                             if (!virtual_loss_path.empty() &&
                                 virtual_loss_path.back().first == state_key &&
                                 virtual_loss_path.back().second == actions[j]) {
-                                node.value[actions[j]] += VIRTUAL_LOSS;  // Undo penalty
+                                node.value[actions[j]] += virtual_loss_;  // Undo penalty
                                 virtual_loss_path.pop_back();
                             }
 
@@ -300,7 +289,7 @@ namespace Connect4 {
                                     if (!vloss_path.empty() &&
                                         vloss_path.back().first == state_key &&
                                         vloss_path.back().second == actions[j]) {
-                                        node.value[actions[j]] += VIRTUAL_LOSS;
+                                        node.value[actions[j]] += virtual_loss_;
                                         vloss_path.pop_back();
                                     }
 
@@ -325,7 +314,7 @@ namespace Connect4 {
                     for (auto& [states, actions, vloss_path] : backups) {
                         for (auto& [key, action] : vloss_path) {
                             if (tree_.find(key) != tree_.end()) {
-                                tree_[key].value[action] += VIRTUAL_LOSS;
+                                tree_[key].value[action] += virtual_loss_;
                             }
                         }
                     }
