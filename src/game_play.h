@@ -6,8 +6,7 @@
 
 #include <torch/torch.h>
 
-#include "connect4_game.h"
-#include "model.h"
+#include "mcts.h"
 
 namespace Connect4 {
 
@@ -15,7 +14,7 @@ namespace Connect4 {
 
     // Play game function
     std::pair<float, int> play_game(
-        std::vector<class MCTS>& mcts_stores,
+        const std::unique_ptr<MCTS>* mcts_stores,
         std::vector<ReplayBuffer::value_type>* local_buffer,
         Connect4Net& net1,
         Connect4Net& net2,

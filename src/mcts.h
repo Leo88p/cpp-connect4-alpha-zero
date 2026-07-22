@@ -1,14 +1,15 @@
 #pragma once
-#include <tsl/robin_map.h>
 #include <vector>
 #include <array>
 #include <cmath>
 #include <random>
 #include <algorithm>
 #include <queue>
-#include <memory>
+#include <memory_resource>
 #include <torch/torch.h>
 #include <future>
+#include <unordered_map>   // CRITICAL: Required for std::pmr::unordered_map
+#include <unordered_set> 
 
 #include "connect4_game.h"
 #include "model.h"
@@ -32,15 +33,20 @@ namespace Connect4 {
     class MCTS {
     public:
         explicit MCTS(float c_puct = 1.0f, float c_fpu = 0.25f, float virtual_loss = 2.0f);
+        MCTS(const MCTS&) = delete;
+        MCTS& operator=(const MCTS&) = delete;
+        MCTS(MCTS&&) = default;
+        MCTS& operator=(MCTS&&) = default;
         
         bool use_noise = true;
 
         void clear();
         size_t size() const;
 
-        std::tuple<float, GameState, Player, std::vector<GameState>, std::vector<int>>
+        std::tuple<float, GameState, Player, std::pmr::vector<GameState>, std::pmr::vector<int>>
             find_leaf(const GameState& root_state, Player player,
-                std::vector<std::pair<uint64_t, int>>* virtual_loss_path);
+                std::pmr::vector<std::pair<uint64_t, int>>* virtual_loss_path,
+                std::pmr::polymorphic_allocator<void> alloc);
 
         bool is_leaf(const GameState& state) const;
 
@@ -58,11 +64,14 @@ namespace Connect4 {
         }
 
     private:
+        // Lock-free, thread-safe (when used by a single thread) memory pool for the tree
+        std::pmr::unsynchronized_pool_resource pool_resource_;
+
+        // PMR-enabled unordered map
+        std::pmr::unordered_map<uint64_t, MCTSNode> tree_;
         float c_puct_;
         float c_fpu_;
         float virtual_loss_;
-
-        tsl::robin_map<uint64_t, MCTSNode> tree_;
 
         // Random number generation for Dirichlet noise
         std::mt19937 rng_;

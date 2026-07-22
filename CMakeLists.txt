@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(Connect4_CPP LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- LibTorch Configuration ---
@@ -12,13 +12,6 @@ find_package(Torch REQUIRED)
 
 # --- Dependencies ---
 include(FetchContent)
-
-FetchContent_Declare(
-    tsl_robin_map
-    GIT_REPOSITORY https://github.com/Tessil/robin-map.git
-    GIT_TAG        v1.4.1
-)
-FetchContent_MakeAvailable(tsl_robin_map)
 
 FetchContent_Declare(
     Catch2
@@ -114,7 +107,6 @@ add_executable(Connect4AlphaZero
 
 target_link_libraries(Connect4AlphaZero PRIVATE 
     ${TORCH_LIBRARIES} 
-    tsl::robin_map
 )
 
 if(MSVC)
@@ -149,7 +141,6 @@ add_executable(Connect4Tests
 
 target_link_libraries(Connect4Tests PRIVATE 
     ${TORCH_LIBRARIES} 
-    tsl::robin_map 
     Catch2::Catch2WithMain
 )
 
@@ -183,7 +174,6 @@ pybind11_add_module(_C
 
 target_link_libraries(_C PRIVATE 
     ${TORCH_LIBRARIES} 
-    tsl::robin_map
 )
 
 if(MSVC)

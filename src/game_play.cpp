@@ -4,11 +4,12 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory_resource> // Required for std::pmr
 
 namespace Connect4 {
 
     std::pair<float, int> play_game(
-        std::vector<MCTS>& mcts_stores,
+        const std::unique_ptr<MCTS>* mcts_stores,
         std::vector<ReplayBuffer::value_type>* local_buffer,
         Connect4Net& net1,
         Connect4Net& net2,
@@ -33,36 +34,55 @@ namespace Connect4 {
         }
 
         Player cur_player = static_cast<Player>(cur_player_int);
-
         int step = 0;
         float tau = steps_before_tau_0 > 0 ? 1.0f : 0.0f;
-        std::vector<std::tuple<GameState, Player, std::array<float, GAME_COLS>>> game_history;
+
+        // PMR OPTIMIZATION: Stack-allocated monotonic buffer for game history.
+        // Connect 4 max moves is 42. 4096 bytes is more than enough to avoid ANY heap allocation.
+        alignas(64) std::byte game_history_buffer[4096];
+        std::pmr::monotonic_buffer_resource gh_mbr{ game_history_buffer, sizeof(game_history_buffer), std::pmr::new_delete_resource() };
+        std::pmr::polymorphic_allocator<void> gh_alloc(&gh_mbr);
+        std::pmr::vector<std::tuple<GameState, Player, std::array<float, GAME_COLS>>> game_history{ gh_alloc };
 
         float result = std::numeric_limits<float>::quiet_NaN();
         float net1_result = std::numeric_limits<float>::quiet_NaN();
-        std::random_device rd;
-        std::mt19937 gen(rd());
+        thread_local std::mt19937 gen(std::random_device{}());
 
         while (std::isnan(result)) {
-            if (cur_player_int >= static_cast<int>(mcts_stores.size())) {
+            if (cur_player_int < 0 || cur_player_int > 1) {
                 throw std::runtime_error("Invalid player index for MCTS stores");
             }
 
             auto& mcts = mcts_stores[cur_player_int];
-            mcts.search_batch(mcts_searches, mcts_batch_size, state,
+            mcts->search_batch(mcts_searches, mcts_batch_size, state,
                 cur_player, nets[cur_player_int], device);
 
-            auto [probs, _] = mcts.get_policy_value(state, tau);
-            auto [h_probs, __] = mcts.get_policy_value(state, 1);
+            auto [probs, _] = mcts->get_policy_value(state, tau);
+            auto [h_probs, __] = mcts->get_policy_value(state, 1);
             game_history.emplace_back(state, cur_player, h_probs);
 
-            // Select action based on probabilities
-            std::vector<float> probs_vec(probs.begin(), probs.end());
-            std::discrete_distribution<int> dist(probs_vec.begin(), probs_vec.end());
-            int action = dist(gen);
+            // BONUS OPTIMIZATION: discrete_distribution accepts iterators directly. 
+            // This completely eliminates the need for the intermediate std::vector<float> allocation.
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            float random_value = dist(gen);
+
+            int action = 0;
+            float cumulative_sum = 0.0f;
+
+            // Линейное сканирование по 7 колонкам Connect4
+            for (int col = 0; col < GAME_COLS; ++col) {
+                cumulative_sum += probs[col];
+                if (random_value <= cumulative_sum) {
+                    action = col;
+                    break;
+                }
+                // На случай микроскопических погрешностей float (например, сумма 0.99999)
+                if (col == GAME_COLS - 1) {
+                    action = col;
+                }
+            }
 
             if (!state.is_valid_move(action)) {
-                // Fallback to first valid move if selected action is invalid
                 auto valid_moves = GameLogic::get_possible_moves(state);
                 if (!valid_moves.empty()) {
                     action = valid_moves[0];
@@ -84,7 +104,6 @@ namespace Connect4 {
             cur_player_int = 1 - cur_player_int;
             cur_player = static_cast<Player>(cur_player_int);
 
-            // Check for draw
             if (GameLogic::get_possible_moves(state).empty()) {
                 result = 0.0f;
                 net1_result = 0.0f;
@@ -97,7 +116,6 @@ namespace Connect4 {
             }
         }
 
-        // Update replay buffer if provided
         if (local_buffer) {
             float current_result = result;
             for (auto it = game_history.rbegin(); it != game_history.rend(); ++it) {
@@ -107,7 +125,6 @@ namespace Connect4 {
                 GameState flipped = s;
                 uint64_t new_black = 0, new_white = 0;
 
-                // Simple bitboard flip (row by row)
                 for (int row = 0; row < 6; ++row) {
                     for (int col = 0; col < 7; ++col) {
                         int orig_pos = row * 7 + col;
@@ -118,9 +135,7 @@ namespace Connect4 {
                         if (s.white_pieces & (1ULL << orig_pos))
                             new_white |= (1ULL << flip_pos);
                     }
-
                 }
-
 
                 flipped.black_pieces = new_black;
                 flipped.white_pieces = new_white;
@@ -135,7 +150,7 @@ namespace Connect4 {
                     }
                     flipped.heights[col] = height;
                 }
-                // Flip policy
+
                 std::array<float, 7> flipped_probs;
                 for (int i = 0; i < 7; ++i)
                     flipped_probs[i] = pr[6 - i];

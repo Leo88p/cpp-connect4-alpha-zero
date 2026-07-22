@@ -2,20 +2,19 @@
 #include <numeric>
 #include <execution>
 #include <thread>
+#include <memory_resource>
+#include <unordered_set>
 
 namespace Connect4 {
 
-
-    // Helper struct to bundle backup data + virtual loss path
+    // PMR-enabled helper struct to ensure internal vectors also use the fast allocator
     struct BackupEntry {
-        std::vector<GameState> states;
-        std::vector<int> actions;
-        std::vector<std::pair<uint64_t, int>> virtual_loss_path;  // Track penalized edges
+        std::pmr::vector<GameState> states;
+        std::pmr::vector<int> actions;
+        std::pmr::vector<std::pair<uint64_t, int>> virtual_loss_path;
 
-        // Constructor for easy emplace_back
-        BackupEntry(std::vector<GameState> s, std::vector<int> a,
-            std::vector<std::pair<uint64_t, int>> vlp)
-            : states(std::move(s)), actions(std::move(a)), virtual_loss_path(std::move(vlp)) {
+        explicit BackupEntry(std::pmr::polymorphic_allocator<void> alloc)
+            : states(alloc), actions(alloc), virtual_loss_path(alloc) {
         }
     };
 
@@ -26,7 +25,9 @@ namespace Connect4 {
         std::fill(probs.begin(), probs.end(), 0.0f);
     }
 
-    MCTS::MCTS(float c_puct, float c_fpu, float virtual_loss) : c_puct_(c_puct), c_fpu_(c_fpu), virtual_loss_(virtual_loss){
+    MCTS::MCTS(float c_puct, float c_fpu, float virtual_loss)
+        : c_puct_(c_puct), c_fpu_(c_fpu), virtual_loss_(virtual_loss),
+        tree_(&pool_resource_) { // Bind the map to the lock-free pool resource
         std::random_device rd;
         rng_.seed(rd());
         dirichlet_dist_ = std::gamma_distribution<float>(0.3f, 1.0f);
@@ -54,13 +55,13 @@ namespace Connect4 {
         return noise;
     }
 
-    // === ENHANCED: find_leaf with virtual loss tracking ===
-    std::tuple<float, GameState, Player, std::vector<GameState>, std::vector<int>>
+    std::tuple<float, GameState, Player, std::pmr::vector<GameState>, std::pmr::vector<int>>
         MCTS::find_leaf(const GameState& root_state, Player player,
-            std::vector<std::pair<uint64_t, int>>* virtual_loss_path) {
+            std::pmr::vector<std::pair<uint64_t, int>>* virtual_loss_path,
+            std::pmr::polymorphic_allocator<void> alloc) {
 
-        std::vector<GameState> states;
-        std::vector<int> actions;
+        std::pmr::vector<GameState> states(alloc);
+        std::pmr::vector<int> actions(alloc);
         GameState cur_state = root_state;
         Player cur_player = player;
         float value = std::numeric_limits<float>::quiet_NaN();
@@ -69,7 +70,6 @@ namespace Connect4 {
             states.push_back(cur_state);
             uint64_t cur_key = cur_state.to_key();
 
-            // Safe access: node must exist if !is_leaf()
             const auto& node = tree_.at(cur_key);
 
             float total_sqrt = std::sqrt(static_cast<float>(std::accumulate(
@@ -80,7 +80,6 @@ namespace Connect4 {
             const auto& values_avg = node.value_avg;
             const auto& counts = node.visit_count;
 
-            // Choose action via UCB (with optional Dirichlet noise at root)
             if (cur_state.to_key() == root_state.to_key() && use_noise) {
                 for (int i = 0; i < GAME_COLS; ++i) {
                     score[i] = values_avg[i] + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
@@ -94,7 +93,6 @@ namespace Connect4 {
                 }
             }
 
-            // Mask invalid actions
             auto valid_moves = GameLogic::get_possible_moves(cur_state);
             std::vector<bool> valid_mask(GAME_COLS, false);
             for (int move : valid_moves) valid_mask[move] = true;
@@ -116,11 +114,8 @@ namespace Connect4 {
 
             actions.push_back(best_action);
 
-            // === VIRTUAL LOSS: Apply penalty BEFORE recursing ===
             if (virtual_loss_path != nullptr) {
-                // Penalize the edge we're about to traverse
-                // Note: node is non-const reference because we need to modify it
-                auto& mutable_node = tree_[cur_key];  // Safe: node exists
+                auto& mutable_node = tree_[cur_key];
                 mutable_node.value[best_action] -= virtual_loss_;
                 virtual_loss_path->emplace_back(cur_key, best_action);
             }
@@ -128,7 +123,7 @@ namespace Connect4 {
             auto [new_state, won] = GameLogic::make_move(cur_state, best_action);
 
             if (won) {
-                value = -1.0f;  // Terminal win: -1 from opponent's perspective
+                value = -1.0f;
                 return { value, new_state, static_cast<Player>(1 - static_cast<int>(cur_player)),
                          std::move(states), std::move(actions) };
             }
@@ -137,12 +132,11 @@ namespace Connect4 {
             cur_player = static_cast<Player>(1 - static_cast<int>(cur_player));
 
             if (GameLogic::get_possible_moves(cur_state).empty()) {
-                value = 0.0f;  // Draw
+                value = 0.0f;
                 return { value, cur_state, cur_player, std::move(states), std::move(actions) };
             }
         }
 
-        uint64_t leaf_key = cur_state.to_key();
         return { std::numeric_limits<float>::quiet_NaN(), cur_state, cur_player,
                  std::move(states), std::move(actions) };
     }
@@ -163,23 +157,25 @@ namespace Connect4 {
     void MCTS::search_minibatch(int count, const GameState& state, Player player,
         Connect4Net& net, const torch::Device& device) {
 
-        std::unordered_map<uint64_t, std::vector<BackupEntry>> pending_backups;
-        std::vector<GameState> expand_states;
-        std::vector<Player> expand_players;
-        std::unordered_set<uint64_t> planned;
+        // PMR OPTIMIZATION: Stack-allocated monotonic buffer for per-batch temporary allocations.
+        // 8KB is generous for a single minibatch search, preventing ANY heap allocation contention.
+        alignas(64) std::byte temp_buffer[8192];
+        std::pmr::monotonic_buffer_resource mbr{ temp_buffer, sizeof(temp_buffer), std::pmr::new_delete_resource() };
+        std::pmr::polymorphic_allocator<void> alloc(&mbr);
 
-        // === Phase 1: Find leaves with virtual loss ===
+        std::pmr::unordered_map<uint64_t, std::pmr::vector<BackupEntry>> pending_backups{ alloc };
+        std::pmr::vector<GameState> expand_states{ alloc };
+        std::pmr::vector<Player> expand_players{ alloc };
+        std::pmr::unordered_set<uint64_t> planned{ alloc };
+
         for (int i = 0; i < count; ++i) {
             try {
-
-                // Track virtual loss path for this search
-                std::vector<std::pair<uint64_t, int>> virtual_loss_path;
+                std::pmr::vector<std::pair<uint64_t, int>> virtual_loss_path{ alloc };
 
                 auto [value, leaf_state, leaf_player, states, actions] =
-                    find_leaf(state, player, &virtual_loss_path);
+                    find_leaf(state, player, &virtual_loss_path, alloc);
 
                 if (!std::isnan(value)) {
-                    // === Terminal backup: reverse virtual loss THEN apply real update ===
                     float terminal_value = value;
                     float cur_value = -terminal_value;
 
@@ -193,15 +189,13 @@ namespace Connect4 {
                             }
                             auto& node = tree_[state_key];
 
-                            // === Reverse virtual loss if this edge was penalized ===
                             if (!virtual_loss_path.empty() &&
                                 virtual_loss_path.back().first == state_key &&
                                 virtual_loss_path.back().second == actions[j]) {
-                                node.value[actions[j]] += virtual_loss_;  // Undo penalty
+                                node.value[actions[j]] += virtual_loss_;
                                 virtual_loss_path.pop_back();
                             }
 
-                            // Normal backup
                             node.visit_count[actions[j]]++;
                             node.value[actions[j]] += cur_value;
                             node.value_avg[actions[j]] = node.value[actions[j]] /
@@ -212,10 +206,16 @@ namespace Connect4 {
                     }
                 }
                 else {
-                    // === Non-terminal: queue for NN expansion ===
                     uint64_t leaf_key = leaf_state.to_key();
-                    pending_backups[leaf_key].emplace_back(
-                        std::move(states), std::move(actions), std::move(virtual_loss_path));
+
+                    // Construct BackupEntry with the monotonic allocator
+                    pending_backups[leaf_key].emplace_back(alloc);
+                    auto& new_entry = pending_backups[leaf_key].back();
+
+                    // Move assignment is O(1) pointer swap because allocators match
+                    new_entry.states = std::move(states);
+                    new_entry.actions = std::move(actions);
+                    new_entry.virtual_loss_path = std::move(virtual_loss_path);
 
                     if (planned.find(leaf_key) == planned.end()) {
                         planned.insert(leaf_key);
@@ -230,10 +230,9 @@ namespace Connect4 {
             }
         }
 
-        // === Phase 2: Expand nodes with batched NN query ===
         if (!expand_states.empty()) {
             try {
-                std::vector<std::future<std::pair<std::array<float, GAME_COLS>, float>>> futures;
+                std::pmr::vector<std::future<std::pair<std::array<float, GAME_COLS>, float>>> futures{ alloc };
                 futures.reserve(expand_states.size());
 
                 for (size_t i = 0; i < expand_states.size(); ++i) {
@@ -241,14 +240,12 @@ namespace Connect4 {
                         expand_states[i], expand_players[i]));
                 }
 
-                // === Phase 3: Create nodes and backup ALL pending searches ===
                 for (size_t i = 0; i < expand_states.size(); ++i) {
                     const auto& leaf_state = expand_states[i];
                     uint64_t leaf_key = leaf_state.to_key();
 
                     auto [probs, value] = futures[i].get();
 
-                    // Create node if needed
                     if (tree_.find(leaf_key) == tree_.end()) {
                         MCTSNode node;
                         auto valid_moves = GameLogic::get_possible_moves(leaf_state);
@@ -269,35 +266,32 @@ namespace Connect4 {
                         tree_[leaf_key] = std::move(node);
                     }
 
-                    // Backup ALL paths that reached this leaf
                     auto it = pending_backups.find(leaf_key);
                     if (it != pending_backups.end()) {
-                        for (auto& [states, actions, vloss_path] : it->second) {
-                            float cur_value = -value;  // Flip perspective
+                        for (auto& entry : it->second) {
+                            float cur_value = -value;
 
-                            for (int j = static_cast<int>(states.size()) - 1; j >= 0; --j) {
-                                if (j < static_cast<int>(actions.size()) &&
-                                    actions[j] >= 0 && actions[j] < GAME_COLS) {
+                            for (int j = static_cast<int>(entry.states.size()) - 1; j >= 0; --j) {
+                                if (j < static_cast<int>(entry.actions.size()) &&
+                                    entry.actions[j] >= 0 && entry.actions[j] < GAME_COLS) {
 
-                                    uint64_t state_key = states[j].to_key();
+                                    uint64_t state_key = entry.states[j].to_key();
                                     if (tree_.find(state_key) == tree_.end()) {
                                         tree_[state_key] = MCTSNode();
                                     }
                                     auto& node = tree_[state_key];
 
-                                    // === Reverse virtual loss before real update ===
-                                    if (!vloss_path.empty() &&
-                                        vloss_path.back().first == state_key &&
-                                        vloss_path.back().second == actions[j]) {
-                                        node.value[actions[j]] += virtual_loss_;
-                                        vloss_path.pop_back();
+                                    if (!entry.virtual_loss_path.empty() &&
+                                        entry.virtual_loss_path.back().first == state_key &&
+                                        entry.virtual_loss_path.back().second == entry.actions[j]) {
+                                        node.value[entry.actions[j]] += virtual_loss_;
+                                        entry.virtual_loss_path.pop_back();
                                     }
 
-                                    // Normal backup
-                                    node.visit_count[actions[j]]++;
-                                    node.value[actions[j]] += cur_value;
-                                    node.value_avg[actions[j]] = node.value[actions[j]] /
-                                        static_cast<float>(node.visit_count[actions[j]]);
+                                    node.visit_count[entry.actions[j]]++;
+                                    node.value[entry.actions[j]] += cur_value;
+                                    node.value_avg[entry.actions[j]] = node.value[entry.actions[j]] /
+                                        static_cast<float>(node.visit_count[entry.actions[j]]);
 
                                     cur_value = -cur_value;
                                 }
@@ -309,10 +303,9 @@ namespace Connect4 {
             }
             catch (const std::exception& e) {
                 std::cerr << "Neural network expansion error: " << e.what() << std::endl;
-                // === CRITICAL: Clean up virtual loss on NN failure ===
                 for (auto& [leaf_key, backups] : pending_backups) {
-                    for (auto& [states, actions, vloss_path] : backups) {
-                        for (auto& [key, action] : vloss_path) {
+                    for (auto& entry : backups) {
+                        for (auto& [key, action] : entry.virtual_loss_path) {
                             if (tree_.find(key) != tree_.end()) {
                                 tree_[key].value[action] += virtual_loss_;
                             }

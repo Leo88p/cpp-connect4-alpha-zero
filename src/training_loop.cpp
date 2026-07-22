@@ -278,13 +278,13 @@ int main(int argc, char** argv) {
         net->eval(); 
         {
             torch::NoGradGuard no_grad;
-            std::vector<std::vector<MCTS>> all_mcts(cfg.parallel_games,
-                std::vector<MCTS>(2, MCTS(cfg.c_puct, cfg.c_fpu, cfg.virtual_loss)));
-
-            for (auto& game_mcts : all_mcts) {
-                for (auto& mcts : game_mcts) {
-                    mcts.set_neural_worker(neural_worker.get());
-                }
+            std::vector<std::unique_ptr<MCTS>> all_mcts;
+            all_mcts.reserve(cfg.parallel_games * 2);
+            for (int i = 0; i < cfg.parallel_games * 2; ++i) {
+                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.c_fpu, cfg.virtual_loss));
+            }
+            for (auto& mcts_ptr : all_mcts) {
+                mcts_ptr->set_neural_worker(neural_worker.get());
             }
 
             std::mutex replay_mutex;
@@ -301,13 +301,13 @@ int main(int argc, char** argv) {
 
                             // Запускаем игру, передавая локальный буфер
                             auto [game_result, steps] = play_game(
-                                all_mcts[i], &local_buffers[i],
+                                &all_mcts[i * 2], &local_buffers[i],
                                 net, net,
                                 cfg.steps_before_tau_0, cfg.mcts_batches, cfg.mcts_batch_size,
                                 std::nullopt, device
                             );
 
-                            int leaves = static_cast<int>(all_mcts[i][0].size());
+                            int leaves = static_cast<int>(all_mcts[i * 2]->size());
                             return { steps, leaves };
                         }
                     ));
@@ -438,9 +438,7 @@ int main(int argc, char** argv) {
                 std::cout << "Avg policy target entropy: " << avg_entropy << std::endl;
             }
             // Convert to tensors
-            auto states_v = torch::empty(
-                { cfg.batch_size, 2, GAME_ROWS, GAME_COLS },
-                torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
+            auto states_v = torch::empty({ cfg.batch_size, 2, GAME_ROWS, GAME_COLS }, torch::kFloat32);
             state_lists_to_batches(states_v, batch_states, batch_who_moves);
             // Convert probs and values to tensors
             torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size), GAME_COLS }, torch::kFloat32);
