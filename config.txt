@@ -6,7 +6,7 @@ net_to_load =
 # --- MCTS & Game Settings ---
 play_episodes = 1024
 parallel_games = 1024
-mcts_batches = 10
+mcts_batches = 20
 mcts_batch_size = 32
 steps_before_tau_0 = 10
 virtual_loss = 2
@@ -25,4 +25,4 @@ adjusted_idx_2 = 10000
 replay_buffer_size = 1000000
 min_replay_to_train = 5000
 num_blocks = 10
-num_filters = 128
+num_filters = 64

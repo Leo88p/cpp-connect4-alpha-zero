@@ -12,103 +12,91 @@
 #include <bit>
 #include <functional>
 
+constexpr static uint64_t bottom(int width, int height) {
+    return width == 0 ? 0 : bottom(width - 1, height) | 1LL << (width - 1) * (height + 1);
+}
 namespace Connect4 {
 
     constexpr int GAME_ROWS = 6;
     constexpr int GAME_COLS = 7;
-    constexpr int COUNT_TO_WIN = 4;
-    constexpr int BOARD_SIZE = GAME_ROWS * GAME_COLS;
 
     enum class Player : uint8_t {
         WHITE = 0,
         BLACK = 1
     };
 
-    struct GameState {
-        uint64_t black_pieces = 0;
-        uint64_t white_pieces = 0;
-        uint64_t occupied = 0; // black_pieces | white_pieces
-        uint8_t heights[GAME_COLS] = { 0 }; // Current height of each column (0-6)
-        Player current_player = Player::BLACK;
-
-        bool operator==(const GameState& other) const {
-            return black_pieces == other.black_pieces &&
-                white_pieces == other.white_pieces &&
-                std::equal(std::begin(heights), std::end(heights), std::begin(other.heights)) &&
-                current_player == other.current_player;
-        }
-
-        uint64_t get_player_pieces(Player player) const {
-            return player == Player::BLACK ? black_pieces : white_pieces;
-        }
-
-        uint64_t get_opponent_pieces(Player player) const {
-            return player == Player::BLACK ? white_pieces : black_pieces;
-        }
-
-        bool is_valid_move(int col) const {
-            return col >= 0 && col < GAME_COLS && heights[col] < GAME_ROWS;
-        }
-
-        // Convert to 64-bit key for hashing/transposition tables
-        uint64_t to_key() const {
-            // Use a standard hash combiner
-            size_t seed = 0;
-
-            // Hash black pieces
-            seed ^= std::hash<uint64_t>()(black_pieces) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-
-            // Hash white pieces
-            seed ^= std::hash<uint64_t>()(white_pieces) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-
-            // Hash heights
-            for (int i = 0; i < GAME_COLS; ++i) {
-                seed ^= std::hash<uint8_t>()(heights[i]) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-            }
-
-            // Hash current player
-            seed ^= std::hash<uint8_t>()(static_cast<uint8_t>(current_player)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-
-            return static_cast<uint64_t>(seed);
-        }
-    };
-
-    class GameLogic {
+    class GameState {
     public:
-        // Declare static members without definitions
-        static const std::array<uint64_t, 69> WIN_PATTERNS;
-        static const GameState INITIAL_STATE;
-
-        // Get all possible moves for current state
-        static std::vector<int> get_possible_moves(const GameState& state);
-
-        // Make a move and return new state with win information
-        static std::pair<GameState, bool> make_move(const GameState& state, int col);
-
-        // Check if the last move at position 'pos' by 'player' resulted in a win
-        static bool check_win(const GameState& state, Player player, int pos);
-
-        // Render the board as strings for display
-        static std::vector<std::string> render(const GameState& state);
-
-        static std::vector<std::vector<int>> to_list_representation(const GameState& state);
-    };
-
-    // Statistics tracking (equivalent to update_counts in Python)
-    class WinStats {
-    public:
-        struct Counts {
-            int wins = 0;
-            int losses = 0;
-            int draws = 0;
-        };
-
-        void update(const std::string& key, const Counts& counts);
-
-        const Counts& get(const std::string& key) const;
+        uint64_t current_position;
+        uint64_t mask;
+        unsigned int moves;
+        GameState(): current_position{ 0 }, mask{ 0 }, moves{ 0 } {}
+        uint64_t key() const {
+            return current_position + mask;
+        }
+        void playCol(int col) {
+            play((mask + bottom_mask_col(col)) & column_mask(col));
+        }
+        void play(uint64_t move) {
+            current_position ^= mask;
+            mask |= move;
+            moves++;
+        }
+        bool canPlay(int col) const {
+            return (mask & top_mask_col(col)) == 0;
+        }
+        uint64_t possible() const {
+            return (mask + bottom_mask) & board_mask;
+        }
+        bool isWinningMove(int col) const {
+            return winning_position() & possible() & column_mask(col);
+        }
 
     private:
-        std::unordered_map<std::string, Counts> stats_;
+        static constexpr uint64_t bottom_mask_col(int col) {
+            return UINT64_C(1) << col * (GAME_ROWS + 1);
+        }
+        static constexpr uint64_t column_mask(int col) {
+            return ((UINT64_C(1) << GAME_ROWS) - 1) << col * (GAME_ROWS + 1);
+        }
+        static constexpr uint64_t top_mask_col(int col) {
+            return UINT64_C(1) << ((GAME_ROWS - 1) + col * (GAME_ROWS + 1));
+        }
+        const static uint64_t bottom_mask = bottom(GAME_COLS, GAME_ROWS);
+        const static uint64_t board_mask = bottom_mask * ((1LL << GAME_ROWS) - 1);
+        uint64_t winning_position() const {
+            return compute_winning_position(current_position, mask);
+        }
+        static uint64_t compute_winning_position(uint64_t position, uint64_t mask) {
+            // vertical;
+            uint64_t r = (position << 1) & (position << 2) & (position << 3);
+
+            //horizontal
+            uint64_t p = (position << (GAME_ROWS + 1)) & (position << 2 * (GAME_ROWS + 1));
+            r |= p & (position << 3 * (GAME_ROWS + 1));
+            r |= p & (position >> (GAME_ROWS + 1));
+            p = (position >> (GAME_ROWS + 1)) & (position >> 2 * (GAME_ROWS + 1));
+            r |= p & (position << (GAME_ROWS + 1));
+            r |= p & (position >> 3 * (GAME_ROWS + 1));
+
+            //diagonal 1
+            p = (position << GAME_ROWS) & (position << 2 * GAME_ROWS);
+            r |= p & (position << 3 * GAME_ROWS);
+            r |= p & (position >> GAME_ROWS);
+            p = (position >> GAME_ROWS) & (position >> 2 * GAME_ROWS);
+            r |= p & (position << GAME_ROWS);
+            r |= p & (position >> 3 * GAME_ROWS);
+
+            //diagonal 2
+            p = (position << (GAME_ROWS + 2)) & (position << 2 * (GAME_ROWS + 2));
+            r |= p & (position << 3 * (GAME_ROWS + 2));
+            r |= p & (position >> (GAME_ROWS + 2));
+            p = (position >> (GAME_ROWS + 2)) & (position >> 2 * (GAME_ROWS + 2));
+            r |= p & (position << (GAME_ROWS + 2));
+            r |= p & (position >> 3 * (GAME_ROWS + 2));
+
+            return r & (board_mask ^ mask);
+        }
     };
 
 } // namespace Connect4

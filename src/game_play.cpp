@@ -4,9 +4,39 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <memory_resource> // Required for std::pmr
+#include <memory_resource>
+#include <bit>       // Required for std::countr_zero
+#include <tuple>
 
 namespace Connect4 {
+
+    // Helper function to horizontally flip a Pascal Pons bitboard state
+    // Each column is exactly 7 bits (6 rows + 1 guard bit). 
+    // We simply swap the 7-bit chunks: col 0 <-> 6, col 1 <-> 5, col 2 <-> 4.
+    static GameState flip_state_horizontally(const GameState& s) {
+        GameState flipped;
+        flipped.moves = s.moves;
+
+        uint64_t new_current = 0;
+        uint64_t new_mask = 0;
+
+        for (int col = 0; col < GAME_COLS; ++col) {
+            int src_col = 6 - col;
+            int shift = src_col * (GAME_ROWS + 1); // 7 bits per column
+
+            // Extract exactly 7 bits (0x7F = 1111111 in binary)
+            uint64_t col_bits_current = (s.current_position >> shift) & 0x7F;
+            uint64_t col_bits_mask = (s.mask >> shift) & 0x7F;
+
+            // Place them in the mirrored column position
+            new_current |= (col_bits_current << (col * (GAME_ROWS + 1)));
+            new_mask |= (col_bits_mask << (col * (GAME_ROWS + 1)));
+        }
+
+        flipped.current_position = new_current;
+        flipped.mask = new_mask;
+        return flipped;
+    }
 
     std::pair<float, int> play_game(
         const std::unique_ptr<MCTS>* mcts_stores,
@@ -19,7 +49,8 @@ namespace Connect4 {
         std::optional<bool> net1_plays_first,
         const torch::Device& device) {
 
-        GameState state = GameLogic::INITIAL_STATE;
+        // Default constructor creates a clean, empty initial state
+        GameState state;
         std::vector<Connect4Net> nets = { net1, net2 };
 
         int cur_player_int;
@@ -54,57 +85,59 @@ namespace Connect4 {
             }
 
             auto& mcts = mcts_stores[cur_player_int];
-            mcts->search_batch(mcts_searches, mcts_batch_size, state,
-                cur_player, nets[cur_player_int], device);
+            mcts->search_batch(mcts_searches, mcts_batch_size, state, cur_player, nets[cur_player_int], device);
 
             auto [probs, _] = mcts->get_policy_value(state, tau);
-            auto [h_probs, __] = mcts->get_policy_value(state, 1);
+            // History always records tau=1.0 policy for training targets
+            auto [h_probs, __] = mcts->get_policy_value(state, 1.0f);
             game_history.emplace_back(state, cur_player, h_probs);
 
-            // BONUS OPTIMIZATION: discrete_distribution accepts iterators directly. 
-            // This completely eliminates the need for the intermediate std::vector<float> allocation.
+            // Sample action from policy
             std::uniform_real_distribution<float> dist(0.0f, 1.0f);
             float random_value = dist(gen);
 
             int action = 0;
             float cumulative_sum = 0.0f;
 
-            // Линейное сканирование по 7 колонкам Connect4
             for (int col = 0; col < GAME_COLS; ++col) {
                 cumulative_sum += probs[col];
                 if (random_value <= cumulative_sum) {
                     action = col;
                     break;
                 }
-                // На случай микроскопических погрешностей float (например, сумма 0.99999)
+                // Fallback for microscopic float inaccuracies (e.g., sum = 0.99999)
                 if (col == GAME_COLS - 1) {
                     action = col;
                 }
             }
 
-            if (!state.is_valid_move(action)) {
-                auto valid_moves = GameLogic::get_possible_moves(state);
-                if (!valid_moves.empty()) {
-                    action = valid_moves[0];
+            // Safety fallback: If the NN somehow assigned probability to a full column, 
+            // redirect to the first genuinely available column.
+            if (!state.canPlay(action)) {
+                uint64_t possible = state.possible();
+                if (possible != 0) {
+                    action = std::countr_zero(possible) / (GAME_ROWS + 1);
                 }
                 else {
                     throw std::runtime_error("No valid moves available");
                 }
             }
 
-            auto [new_state, won] = GameLogic::make_move(state, action);
+            // Check win BEFORE playing the move, using native bitboard logic
+            bool won = state.isWinningMove(action);
+            state.playCol(action);
 
             if (won) {
                 result = 1.0f;
                 net1_result = (cur_player_int == 0) ? 1.0f : -1.0f;
-                state = new_state;
                 break;
             }
-            state = new_state;
+
             cur_player_int = 1 - cur_player_int;
             cur_player = static_cast<Player>(cur_player_int);
 
-            if (GameLogic::get_possible_moves(state).empty()) {
+            // Check for draw (board is full)
+            if (state.possible() == 0) {
                 result = 0.0f;
                 net1_result = 0.0f;
                 break;
@@ -116,46 +149,27 @@ namespace Connect4 {
             }
         }
 
+        // Data Augmentation: Save original and horizontally flipped states
         if (local_buffer) {
             float current_result = result;
             for (auto it = game_history.rbegin(); it != game_history.rend(); ++it) {
                 const auto& [s, p, pr] = *it;
+
+                // 1. Save original state
                 local_buffer->emplace_back(std::make_tuple(s, p, pr, current_result));
 
-                GameState flipped = s;
-                uint64_t new_black = 0, new_white = 0;
+                // 2. Generate and save flipped state
+                GameState flipped = flip_state_horizontally(s);
 
-                for (int row = 0; row < 6; ++row) {
-                    for (int col = 0; col < 7; ++col) {
-                        int orig_pos = row * 7 + col;
-                        int flip_pos = row * 7 + (6 - col);
-
-                        if (s.black_pieces & (1ULL << orig_pos))
-                            new_black |= (1ULL << flip_pos);
-                        if (s.white_pieces & (1ULL << orig_pos))
-                            new_white |= (1ULL << flip_pos);
-                    }
-                }
-
-                flipped.black_pieces = new_black;
-                flipped.white_pieces = new_white;
-                flipped.occupied = new_white | new_black;
-
-                for (int col = 0; col < 7; ++col) {
-                    int height = 0;
-                    for (int row = 0; row < 6; ++row) {
-                        int pos = row * 7 + col;
-                        if (flipped.occupied & (1ULL << pos))
-                            height = row + 1;
-                    }
-                    flipped.heights[col] = height;
-                }
-
-                std::array<float, 7> flipped_probs;
-                for (int i = 0; i < 7; ++i)
+                std::array<float, GAME_COLS> flipped_probs;
+                for (int i = 0; i < GAME_COLS; ++i) {
                     flipped_probs[i] = pr[6 - i];
+                }
 
+                // Note: The perspective (player 'p') remains the same, but the board is mirrored.
+                // The result from the perspective of the flipped state's player is inverted.
                 local_buffer->emplace_back(std::make_tuple(flipped, p, flipped_probs, current_result));
+
                 current_result = -current_result;
             }
         }

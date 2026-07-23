@@ -8,26 +8,39 @@
 #include <memory_resource>
 #include <torch/torch.h>
 #include <future>
-#include <unordered_map>   // CRITICAL: Required for std::pmr::unordered_map
-#include <unordered_set> 
+#include <unordered_map>
+#include <unordered_set>
+#include <bit>
 
-#include "connect4_game.h"
+#include "connect4_game.h" // Assumes this includes the updated GameState
 #include "model.h"
 #include "neural_worker.h"
 
 namespace Connect4 {
 
+    struct ChildStats {
+        uint64_t move = 0;          // The actual bitboard move
+        int visit_count = 0;
+        float value = 0.0f;
+        float value_avg = 0.0f;
+        float prob = 0.0f;
+    };
+
     class MCTSNode {
     public:
-        std::array<int, GAME_COLS> visit_count = { 0 };
-        std::array<float, GAME_COLS> value = { 0.0f };
-        std::array<float, GAME_COLS> value_avg = { 0.0f };
-        std::array<float, GAME_COLS> probs = { 0.0f };
+        std::array<ChildStats, GAME_COLS> children;
+        int num_children = 0; // Only iterate up to this number
 
         MCTSNode() = default;
-        MCTSNode(const MCTSNode& other) = default; // Use default copy constructor
 
-        void reset();
+        void reset() {
+            for (int i = 0; i < num_children; ++i) {
+                children[i].visit_count = 0;
+                children[i].value = 0.0f;
+                children[i].value_avg = 0.0f;
+                children[i].prob = 0.0f;
+            }
+        }
     };
 
     class MCTS {
@@ -37,15 +50,16 @@ namespace Connect4 {
         MCTS& operator=(const MCTS&) = delete;
         MCTS(MCTS&&) = default;
         MCTS& operator=(MCTS&&) = default;
-        
+
         bool use_noise = true;
 
         void clear();
         size_t size() const;
 
-        std::tuple<float, GameState, Player, std::pmr::vector<GameState>, std::pmr::vector<int>>
+        // Note: actions vector now stores uint64_t move bitboards, not int indices
+        std::tuple<float, GameState, Player, std::pmr::vector<GameState>, std::pmr::vector<uint64_t>>
             find_leaf(const GameState& root_state, Player player,
-                std::pmr::vector<std::pair<uint64_t, int>>* virtual_loss_path,
+                std::pmr::vector<std::pair<uint64_t, uint64_t>>* virtual_loss_path,
                 std::pmr::polymorphic_allocator<void> alloc);
 
         bool is_leaf(const GameState& state) const;
@@ -56,28 +70,26 @@ namespace Connect4 {
         void search_minibatch(int count, const GameState& state, Player player,
             Connect4Net& net, const torch::Device& device);
 
+        // Returns arrays indexed by column (0-6) for compatibility with training pipeline
         std::pair<std::array<float, GAME_COLS>, std::array<float, GAME_COLS>>
             get_policy_value(const GameState& state, float tau = 1.0f) const;
+
         NeuralWorker* neural_worker_ = nullptr;
         void set_neural_worker(NeuralWorker* worker) {
             neural_worker_ = worker;
         }
 
     private:
-        // Lock-free, thread-safe (when used by a single thread) memory pool for the tree
         std::pmr::unsynchronized_pool_resource pool_resource_;
-
-        // PMR-enabled unordered map
         std::pmr::unordered_map<uint64_t, MCTSNode> tree_;
         float c_puct_;
         float c_fpu_;
         float virtual_loss_;
 
-        // Random number generation for Dirichlet noise
         std::mt19937 rng_;
         std::gamma_distribution<float> dirichlet_dist_;
+        std::array<float, GAME_COLS> dirichlet_noise;
 
         std::array<float, GAME_COLS> generate_dirichlet_noise();
-        std::array<float, GAME_COLS> dirichlet_noise;
     };
 }

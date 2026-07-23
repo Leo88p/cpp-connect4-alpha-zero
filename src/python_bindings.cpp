@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <bit> // Required for std::countr_zero
 
 #include "connect4_game.h"
 #include "mcts.h"
@@ -14,20 +15,60 @@ using namespace Connect4;
 // Wrapper class for GameState to expose to Python
 class PyGameState {
 public:
-    PyGameState() : state(GameLogic::INITIAL_STATE) {}
+    PyGameState() : state() {} // Default constructor creates an empty initial state
     PyGameState(const GameState& s) : state(s) {}
 
+    // Convert bitboard to a 2D list (6 rows x 7 cols) for Python visualization
+    // 0 = empty, 1 = current player to move, 2 = opponent
     std::vector<std::vector<int>> to_list_representation() const {
-        return GameLogic::to_list_representation(state);
+        std::vector<std::vector<int>> board(GAME_ROWS, std::vector<int>(GAME_COLS, 0));
+        uint64_t our_pieces = state.current_position;
+        uint64_t their_pieces = state.mask ^ state.current_position;
+
+        for (int col = 0; col < GAME_COLS; ++col) {
+            for (int row = 0; row < GAME_ROWS; ++row) {
+                int pos = col * (GAME_ROWS + 1) + row;
+                int visual_row = (GAME_ROWS - 1) - row; // Flip so row 0 is top of the board
+
+                if (our_pieces & (1ULL << pos)) {
+                    board[visual_row][col] = 1;
+                }
+                else if (their_pieces & (1ULL << pos)) {
+                    board[visual_row][col] = 2;
+                }
+            }
+        }
+        return board;
     }
 
     static PyGameState initial_state() {
-        return PyGameState(GameLogic::INITIAL_STATE);
+        return PyGameState(); // Default constructor is the initial state
     }
 
     GameState get_state() const { return state; }
+
+    // Helper to get valid moves as a list of ints for Python
+    std::vector<int> get_possible_moves() const {
+        std::vector<int> moves;
+        uint64_t possible = state.possible();
+        while (possible) {
+            uint64_t move = possible & -possible; // Isolate lowest set bit
+            moves.push_back(std::countr_zero(move) / (GAME_ROWS + 1));
+            possible ^= move; // Clear lowest set bit
+        }
+        return moves;
+    }
+
+    bool can_play(int col) const {
+        return state.canPlay(col);
+    }
+
+    bool is_winning_move(int col) const {
+        return state.isWinningMove(col);
+    }
+
 private:
-        GameState state;
+    GameState state;
 };
 
 // Wrapper for Neural Network
@@ -55,7 +96,6 @@ public:
     }
 
     std::pair<py::array_t<float>, py::array_t<float>> forward(py::array_t<float> input_array) {
-        // Convert numpy array to torch tensor
         py::buffer_info buf = input_array.request();
 
         torch::Tensor tensor;
@@ -81,7 +121,6 @@ public:
 
         auto [logits, values] = net->forward(tensor);
 
-        // Convert to numpy arrays
         auto logits_cpu = logits.to(torch::kCPU).detach();
         auto values_cpu = values.to(torch::kCPU).detach();
 
@@ -94,14 +133,8 @@ public:
             static_cast<py::ssize_t>(values_cpu.size(0))
             });
 
-        // Copy data
-        std::memcpy(logits_array.mutable_data(),
-            logits_cpu.data_ptr<float>(),
-            logits_cpu.numel() * sizeof(float));
-
-        std::memcpy(values_array.mutable_data(),
-            values_cpu.data_ptr<float>(),
-            values_cpu.numel() * sizeof(float));
+        std::memcpy(logits_array.mutable_data(), logits_cpu.data_ptr<float>(), logits_cpu.numel() * sizeof(float));
+        std::memcpy(values_array.mutable_data(), values_cpu.data_ptr<float>(), values_cpu.numel() * sizeof(float));
 
         return { logits_array, values_array };
     }
@@ -115,14 +148,14 @@ private:
 // Wrapper for MCTS
 class PyMCTS {
 public:
-    PyMCTS(float c_puct = 1.0f) : mcts(c_puct) {
+    PyMCTS(float c_puct = 1.0f, float c_fpu = 0.25f, float virtual_loss = 2.0f)
+        : mcts(c_puct, c_fpu, virtual_loss) {
         mcts.use_noise = false;
     }
 
     void search_batch(int count, int batch_size, const PyGameState& state,
         int player, PyNet& net_wrapper, const std::string& device_str) {
         torch::Device device(device_str);
-        // Get the actual network from the wrapper
         Connect4Net net = net_wrapper.get_net();
         if (!neural_worker_) {
             neural_worker_ = std::make_unique<Connect4::NeuralWorker>(net, device, 256);
@@ -156,58 +189,37 @@ private:
     std::unique_ptr<Connect4::NeuralWorker> neural_worker_ = nullptr;
 };
 
-// Play game function wrapper
-std::tuple<std::vector<std::tuple<int, int, float>>, float, int, bool>
-py_play_game(PyMCTS& mcts1, PyMCTS& mcts2, PyNet& net1, PyNet& net2,
-    int steps_before_tau_0, int mcts_searches, int mcts_batch_size,
-    std::optional<bool> net1_plays_first, const std::string& device_str,
-    size_t max_replay_size) {
-
-    torch::Device device(device_str);
-
-
-    std::vector<MCTS> mcts_stores;
-    mcts_stores.push_back(MCTS(1.0f)); // Copy from PyMCTS
-    mcts_stores.push_back(MCTS(1.0f)); // Copy from PyMCTS
-
-    auto n1 = net1.get_net();
-    auto n2 = net2.get_net();
-    auto [result, steps] = play_game(
-        mcts_stores, nullptr,
-        n1, n2,
-        steps_before_tau_0, mcts_searches, mcts_batch_size,
-        net1_plays_first, device
-    );
-
-    // For visualization, we just need the result and steps
-    std::vector<std::tuple<int, int, float>> empty_moves; // Placeholder
-    return { empty_moves, result, steps, true }; // won flag not used
-}
-
-// Module definition
 // Module definition
 PYBIND11_MODULE(_C, m) {
-    m.doc() = "Connect4 AlphaZero C++ core with high-performance simulation";
+    m.doc() = "Connect4 AlphaZero C++ core with high-performance bitboard simulation";
 
     m.attr("GAME_ROWS") = GAME_ROWS;
     m.attr("GAME_COLS") = GAME_COLS;
-    m.attr("COUNT_TO_WIN") = COUNT_TO_WIN;
 
     py::class_<PyGameState>(m, "GameState")
         .def(py::init<>())
         .def("to_list_representation", &PyGameState::to_list_representation)
         .def_static("initial_state", &PyGameState::initial_state)
+        .def("get_possible_moves", &PyGameState::get_possible_moves)
+        .def("can_play", &PyGameState::can_play)
+        .def("is_winning_move", &PyGameState::is_winning_move)
         .def_property_readonly("heights", [](const PyGameState& self) {
         std::array<int, GAME_COLS> heights;
         const GameState& state = self.get_state();
-        for (int i = 0; i < GAME_COLS; ++i) {
-            heights[i] = state.heights[i];
+        uint64_t mask = state.mask;
+        for (int col = 0; col < GAME_COLS; ++col) {
+            // Extract the 7-bit chunk for this column (6 rows + 1 guard bit)
+            int shift = col * (GAME_ROWS + 1);
+            uint64_t col_mask = (mask >> shift) & 0x7F;
+            // Trailing zeros perfectly equal the number of pieces in the column
+            heights[col] = std::countr_zero(col_mask);
         }
         return heights;
             });
 
     py::class_<PyMCTS>(m, "MCTS")
-        .def(py::init<float>(), py::arg("c_puct") = 1.0f)
+        .def(py::init<float, float, float>(),
+            py::arg("c_puct") = 1.0f, py::arg("c_fpu") = 0.25f, py::arg("virtual_loss") = 2.0f)
         .def("search_batch", &PyMCTS::search_batch,
             py::arg("count"), py::arg("batch_size"), py::arg("state"),
             py::arg("player"), py::arg("net"), py::arg("device") = "cpu")
@@ -220,23 +232,18 @@ PYBIND11_MODULE(_C, m) {
         .def(py::init<>())
         .def(py::init<const std::string&, const int, const int, const std::string&>(),
             py::arg("path"), py::arg("blocks"), py::arg("filters"), py::arg("device") = "cpu")
-        .def("load", &PyNet::load,
-            py::arg("path"), py::arg("device") = "cpu")
-        .def("forward", &PyNet::forward)
-        .def("get_net", &PyNet::get_net);
+        .def("load", &PyNet::load, py::arg("path"), py::arg("device") = "cpu")
+        .def("forward", &PyNet::forward);
 
-    m.def("play_game", &py_play_game,
-        py::arg("mcts1"), py::arg("mcts2"), py::arg("net1"), py::arg("net2"),
-        py::arg("steps_before_tau_0") = 10, py::arg("mcts_searches") = 40,
-        py::arg("mcts_batch_size") = 32, py::arg("net1_plays_first") = std::nullopt,
-        py::arg("device") = "cpu", py::arg("max_replay_size") = 5000);
-
-    m.def("make_move", [](const PyGameState& state, int col, int player) {
-        auto [new_state, won] = GameLogic::make_move(state.get_state(), col);
+    // make_move no longer needs the 'player' argument because the bitboard inherently knows whose turn it is!
+    m.def("make_move", [](const PyGameState& state, int col) {
+        GameState new_state = state.get_state();
+        bool won = new_state.isWinningMove(col);
+        new_state.playCol(col); // playCol automatically swaps current_position and mask
         return std::make_pair(PyGameState(new_state), won);
-        }, py::arg("state"), py::arg("col"), py::arg("player"));
+        }, py::arg("state"), py::arg("col"));
 
     m.def("possible_moves", [](const PyGameState& state) {
-        return GameLogic::get_possible_moves(state.get_state());
+        return state.get_possible_moves();
         }, py::arg("state"));
 }

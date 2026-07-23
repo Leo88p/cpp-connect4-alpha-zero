@@ -35,7 +35,7 @@ namespace Connect4 {
 
         // === CUDA OPTIMIZATIONS ===
         torch::Tensor cpu_staging_buffer_;
-        torch::Tensor gpu_input_buffer_;          // Reusable [B, 3, R, C] on GPU
+        torch::Tensor gpu_input_buffer_;          // Reusable [B, 2, R, C] on GPU
         torch::Tensor pinned_probs_host_;         // Pinned [B, GAME_COLS] on CPU
         torch::Tensor pinned_values_host_;        // Pinned [B, 1] on CPU
         c10::cuda::CUDAStream stream_ = c10::cuda::getCurrentCUDAStream(); // Safe default
@@ -53,13 +53,13 @@ namespace Connect4 {
 
                 // 1. PINNED CPU buffer (zero-copy async H2D compatible)
                 cpu_staging_buffer_ = torch::empty(
-                    { batch_size_, 3, GAME_ROWS, GAME_COLS },
+                    { batch_size_, 2, GAME_ROWS, GAME_COLS },
                     torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true)
                 );
 
                 // 2. GPU buffer for inference
                 gpu_input_buffer_ = torch::empty(
-                    { batch_size_, 3, GAME_ROWS, GAME_COLS },
+                    { batch_size_, 2, GAME_ROWS, GAME_COLS },
                     torch::TensorOptions().dtype(torch::kFloat32).device(device_)
                 );
 
@@ -110,7 +110,7 @@ namespace Connect4 {
                     queue_.pop();
 
                     auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::microseconds(500);
+                        std::chrono::microseconds(10);
                     while (batch.size() < static_cast<size_t>(batch_size_) &&
                         !queue_.empty()) {
                         auto remaining = deadline - std::chrono::steady_clock::now();

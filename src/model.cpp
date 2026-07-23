@@ -34,7 +34,7 @@ namespace Connect4 {
     Connect4NetImpl::Connect4NetImpl(int num_blocks, int num_filters) {
         // Input shape: (2, 6, 7)
         conv_in = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(3, num_filters, 3).padding(1)),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(2, num_filters, 3).padding(1)),
             torch::nn::BatchNorm2d(num_filters),
             torch::nn::LeakyReLU()
         );
@@ -114,43 +114,52 @@ namespace Connect4 {
     }
 
     void state_lists_to_batches(torch::Tensor& cpu_buffer,
-        const std::vector<GameState>& states,
-        const std::vector<Player>& who_moves) {
+        const std::vector<Connect4::GameState>& states,
+        const std::vector<Connect4::Player>& who_moves) { // Kept for signature compatibility, but ignored
+
         TORCH_CHECK(cpu_buffer.device().is_cpu(), "fill_batch_buffer requires a CPU tensor");
         TORCH_CHECK(cpu_buffer.is_contiguous(), "Buffer must be contiguous");
 
         float* ptr = cpu_buffer.data_ptr<float>();
-        const int channel_stride = GAME_ROWS * GAME_COLS; // 6*7 = 42
-        const int sample_stride = 3 * channel_stride;
+        const int channel_stride = Connect4::GAME_ROWS * Connect4::GAME_COLS; // 6 * 7 = 42
+        const int sample_stride = 2 * channel_stride;
 
         for (size_t idx = 0; idx < states.size(); ++idx) {
             const auto& state = states[idx];
-            Player who_move = who_moves[idx];
 
-            int our_channel = 0;
-            int their_channel = 1;
-            int player_channel = 2;
+            // MAGIC OF PASCAL PONS' BITBOARD:
+            // current_position is ALWAYS the pieces of the player whose turn it is.
+            // mask ^ current_position is ALWAYS the opponent's pieces.
+            // We completely ignore 'who_moves' because the bitboard already knows!
+            uint64_t our_pieces = state.current_position;
+            uint64_t their_pieces = state.mask ^ state.current_position;
 
-            uint64_t our_pieces = (who_move == Player::BLACK) ? state.black_pieces : state.white_pieces;
-            uint64_t their_pieces = (who_move == Player::BLACK) ? state.white_pieces : state.black_pieces;
+            float* our_plane = ptr + idx * sample_stride + 0 * channel_stride;
+            float* their_plane = ptr + idx * sample_stride + 1 * channel_stride;
 
-            float* our_plane = ptr + idx * sample_stride + our_channel * channel_stride;
-            float* their_plane = ptr + idx * sample_stride + their_channel * channel_stride;
-            float* player_plane = ptr + idx * sample_stride + player_channel * channel_stride;
-
-            // Zero out planes (CPU-safe)
+            // Zero out planes (CPU-safe and fast)
             std::memset(our_plane, 0, channel_stride * sizeof(float));
             std::memset(their_plane, 0, channel_stride * sizeof(float));
-            std::memset(player_plane, 0, channel_stride * sizeof(float));
 
-            for (int pos = 0; pos < 42; ++pos) {
-                int row = pos / 7;
-                int col = pos % 7;
-                int tensor_idx = (GAME_ROWS - 1 - row) * GAME_COLS + col; // Flip vertically
+            // Unpack bits to the 6x7 grid.
+            // Pascal Pons' layout is column-major with a 1-bit guard per column (stride = 7).
+            // Therefore: bit_position = col * 7 + row (where row 0 is the BOTTOM of the board).
+            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                for (int row = 0; row < Connect4::GAME_ROWS; ++row) {
+                    int pos = col * 7 + row;
 
-                if (our_pieces & (1ULL << pos))   our_plane[tensor_idx] = 1.0f;
-                if (their_pieces & (1ULL << pos)) their_plane[tensor_idx] = 1.0f;
-                player_plane[tensor_idx] = (who_move == Player::BLACK) ? 1 : -1;
+                    // Neural networks typically expect row 0 to be the TOP of the board.
+                    // We flip the row index to match standard image-like [2, 6, 7] tensor layouts.
+                    int tensor_row = (Connect4::GAME_ROWS - 1) - row;
+                    int tensor_idx = tensor_row * Connect4::GAME_COLS + col;
+
+                    if (our_pieces & (1ULL << pos)) {
+                        our_plane[tensor_idx] = 1.0f;
+                    }
+                    if (their_pieces & (1ULL << pos)) {
+                        their_plane[tensor_idx] = 1.0f;
+                    }
+                }
             }
         }
     }

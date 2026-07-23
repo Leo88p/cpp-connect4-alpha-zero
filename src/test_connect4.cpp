@@ -6,10 +6,10 @@
 using namespace Connect4;
 
 // Helper to count pieces (for debugging)
-int count_pieces(uint64_t board) {
+/*int count_pieces(uint64_t board) {
     return std::popcount(board);
 }
-/*void apply_moves(GameState& state, const std::vector<int>& moves) {
+void apply_moves(GameState& state, const std::vector<int>& moves) {
     for (int col : moves) {
         state.make_move(col);
     }

@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, cfg.parallel_games);
+        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, cfg.parallel_games * cfg.mcts_batch_size);
         net->eval(); 
         {
             torch::NoGradGuard no_grad;
@@ -438,7 +438,7 @@ int main(int argc, char** argv) {
                 std::cout << "Avg policy target entropy: " << avg_entropy << std::endl;
             }
             // Convert to tensors
-            auto states_v = torch::empty({ cfg.batch_size, 3, GAME_ROWS, GAME_COLS }, torch::kFloat32);
+            auto states_v = torch::empty({ cfg.batch_size, 2, GAME_ROWS, GAME_COLS }, torch::kFloat32);
             state_lists_to_batches(states_v, batch_states, batch_who_moves);
             // Convert probs and values to tensors
             torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size), GAME_COLS }, torch::kFloat32);
