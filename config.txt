@@ -5,9 +5,9 @@ net_to_load =
 
 # --- MCTS & Game Settings ---
 play_episodes = 1024
-parallel_games = 256
-mcts_batches = 40
-mcts_batch_size = 16
+parallel_games = 1024
+mcts_batches = 10
+mcts_batch_size = 32
 steps_before_tau_0 = 10
 virtual_loss = 2
 c_puct = 1
@@ -18,11 +18,11 @@ train_rounds = 32
 learning_rate = 0.02
 learning_rate_adjusted_1 = 0.002
 learning_rate_adjusted_2 = 0.0001
-adjusted_idx_1 = 10
+adjusted_idx_1 = 20
 adjusted_idx_2 = 10000
 
 # --- Buffer & Network Architecture ---
-replay_buffer_size = 100000
+replay_buffer_size = 1000000
 min_replay_to_train = 5000
 num_blocks = 10
-num_filters = 64
+num_filters = 128

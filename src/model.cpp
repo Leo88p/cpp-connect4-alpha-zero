@@ -34,7 +34,7 @@ namespace Connect4 {
     Connect4NetImpl::Connect4NetImpl(int num_blocks, int num_filters) {
         // Input shape: (2, 6, 7)
         conv_in = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(2, num_filters, 3).padding(1)),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(3, num_filters, 3).padding(1)),
             torch::nn::BatchNorm2d(num_filters),
             torch::nn::LeakyReLU()
         );
@@ -121,7 +121,7 @@ namespace Connect4 {
 
         float* ptr = cpu_buffer.data_ptr<float>();
         const int channel_stride = GAME_ROWS * GAME_COLS; // 6*7 = 42
-        const int sample_stride = 2 * channel_stride;
+        const int sample_stride = 3 * channel_stride;
 
         for (size_t idx = 0; idx < states.size(); ++idx) {
             const auto& state = states[idx];
@@ -129,16 +129,19 @@ namespace Connect4 {
 
             int our_channel = 0;
             int their_channel = 1;
+            int player_channel = 2;
 
             uint64_t our_pieces = (who_move == Player::BLACK) ? state.black_pieces : state.white_pieces;
             uint64_t their_pieces = (who_move == Player::BLACK) ? state.white_pieces : state.black_pieces;
 
             float* our_plane = ptr + idx * sample_stride + our_channel * channel_stride;
             float* their_plane = ptr + idx * sample_stride + their_channel * channel_stride;
+            float* player_plane = ptr + idx * sample_stride + player_channel * channel_stride;
 
             // Zero out planes (CPU-safe)
             std::memset(our_plane, 0, channel_stride * sizeof(float));
             std::memset(their_plane, 0, channel_stride * sizeof(float));
+            std::memset(player_plane, 0, channel_stride * sizeof(float));
 
             for (int pos = 0; pos < 42; ++pos) {
                 int row = pos / 7;
@@ -147,6 +150,7 @@ namespace Connect4 {
 
                 if (our_pieces & (1ULL << pos))   our_plane[tensor_idx] = 1.0f;
                 if (their_pieces & (1ULL << pos)) their_plane[tensor_idx] = 1.0f;
+                player_plane[tensor_idx] = (who_move == Player::BLACK) ? 1 : -1;
             }
         }
     }
