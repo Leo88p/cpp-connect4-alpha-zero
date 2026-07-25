@@ -92,36 +92,9 @@ namespace Connect4 {
             auto [h_probs, __] = mcts->get_policy_value(state, 1.0f);
             game_history.emplace_back(state, cur_player, h_probs);
 
-            // Sample action from policy
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            float random_value = dist(gen);
-
-            int action = 0;
-            float cumulative_sum = 0.0f;
-
-            for (int col = 0; col < GAME_COLS; ++col) {
-                cumulative_sum += probs[col];
-                if (random_value <= cumulative_sum) {
-                    action = col;
-                    break;
-                }
-                // Fallback for microscopic float inaccuracies (e.g., sum = 0.99999)
-                if (col == GAME_COLS - 1) {
-                    action = col;
-                }
-            }
-
-            // Safety fallback: If the NN somehow assigned probability to a full column, 
-            // redirect to the first genuinely available column.
-            if (!state.canPlay(action)) {
-                uint64_t possible = state.possible();
-                if (possible != 0) {
-                    action = std::countr_zero(possible) / (GAME_ROWS + 1);
-                }
-                else {
-                    throw std::runtime_error("No valid moves available");
-                }
-            }
+            std::vector<float> probs_vec(probs.begin(), probs.end());
+            std::discrete_distribution<int> dist(probs_vec.begin(), probs_vec.end());
+            int action = dist(gen);
 
             // Check win BEFORE playing the move, using native bitboard logic
             bool won = state.isWinningMove(action);
@@ -154,7 +127,6 @@ namespace Connect4 {
             float current_result = result;
             for (auto it = game_history.rbegin(); it != game_history.rend(); ++it) {
                 const auto& [s, p, pr] = *it;
-
                 // 1. Save original state
                 local_buffer->emplace_back(std::make_tuple(s, p, pr, current_result));
 

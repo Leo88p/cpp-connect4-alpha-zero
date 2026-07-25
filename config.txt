@@ -4,25 +4,25 @@ device_str = cuda
 net_to_load = 
 
 # --- MCTS & Game Settings ---
-play_episodes = 1024
-parallel_games = 1024
-mcts_batches = 20
+play_episodes = 25
+parallel_games =25
+mcts_batches = 10
 mcts_batch_size = 32
 steps_before_tau_0 = 10
-virtual_loss = 2
+virtual_loss = 1
 c_puct = 1
 
 # --- Training Settings ---
-batch_size = 2048
+batch_size = 128
 train_rounds = 32
-learning_rate = 0.02
-learning_rate_adjusted_1 = 0.002
-learning_rate_adjusted_2 = 0.0001
-adjusted_idx_1 = 20
-adjusted_idx_2 = 10000
+learning_rate = 0.002
+learning_rate_adjusted_1 = 0.0002
+learning_rate_adjusted_2 = 0.00002
+adjusted_idx_1 = 100
+adjusted_idx_2 = 1000
 
 # --- Buffer & Network Architecture ---
-replay_buffer_size = 1000000
-min_replay_to_train = 5000
+replay_buffer_size = 20000
+min_replay_to_train = 2000
 num_blocks = 10
 num_filters = 64

@@ -68,27 +68,20 @@ namespace Connect4 {
 
         // Create dummy input to determine sizes
         torch::Tensor dummy = torch::zeros({ 1, num_filters, GAME_ROWS, GAME_COLS });
-
+        int val_size = 0;
+        int policy_size = 0;
         {
             torch::NoGradGuard no_grad;
-
-            // Get value head size
-            torch::Tensor dummy_val = conv_val->forward(dummy.clone());
-            int val_size = dummy_val.size(1);
-            val_linear1 = torch::nn::Linear(val_size, 128);
-            val_linear2 = torch::nn::Linear(128, 1);
-            //val_linear3 = torch::nn::Linear(256, 1);
-
-            // Get policy head size
-            torch::Tensor dummy_policy = conv_policy->forward(dummy.clone());
-            int policy_size = dummy_policy.size(1);
-            policy_linear = torch::nn::Linear(policy_size, GAME_COLS);
+            val_size = conv_val->forward(dummy).size(1);
+            policy_size = conv_policy->forward(dummy).size(1);
         }
 
-        // Register the linear layers
+        val_linear1 = torch::nn::Linear(val_size, 128);
+        val_linear2 = torch::nn::Linear(128, 1);
+        policy_linear = torch::nn::Linear(policy_size, GAME_COLS);
+
         register_module("val_linear1", val_linear1);
         register_module("val_linear2", val_linear2);
-        //register_module("val_linear3", val_linear3);
         register_module("policy_linear", policy_linear);
     }
 
@@ -96,7 +89,7 @@ namespace Connect4 {
         x = conv_in->forward(x);
         
         for (size_t i = 0; i < residual_blocks->size(); ++i) {
-            auto block = residual_blocks[i]->as<ResidualBlockImpl>();
+            auto block = (*residual_blocks)[i]->as<ResidualBlockImpl>();
             x = block->forward(x);
         } 
 

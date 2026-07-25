@@ -492,6 +492,7 @@ int main(int argc, char** argv) {
 
         Connect4Net current_net = net;
 
+
         std::ostringstream filename;
         filename << "checkpoint_" << std::setw(5) << std::setfill('0') << step_idx
             << ".pt";
