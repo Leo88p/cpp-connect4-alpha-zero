@@ -85,7 +85,7 @@ namespace Connect4 {
             }
 
             auto& mcts = mcts_stores[cur_player_int];
-            mcts->search_batch(mcts_searches, mcts_batch_size, state, cur_player, nets[cur_player_int], device);
+            mcts->search_batch(mcts_searches, mcts_batch_size, state, cur_player);
 
             auto [probs, _] = mcts->get_policy_value(state, tau);
             // History always records tau=1.0 policy for training targets

@@ -21,7 +21,6 @@ namespace Connect4 {
     void MCTSNode::reset() {
         std::fill(visit_count.begin(), visit_count.end(), 0);
         std::fill(value.begin(), value.end(), 0.0f);
-        std::fill(value_avg.begin(), value_avg.end(), 0.0f);
         std::fill(probs.begin(), probs.end(), 0.0f);
     }
 
@@ -77,18 +76,17 @@ namespace Connect4 {
 
             std::array<float, GAME_COLS> score;
             const auto& probs = node.probs;
-            const auto& values_avg = node.value_avg;
             const auto& counts = node.visit_count;
 
             if (cur_state.key() == root_state.key() && use_noise) {
                 for (int i = 0; i < GAME_COLS; ++i) {
-                    score[i] = values_avg[i] + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
+                    score[i] = node.value_avg(i) + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
                         total_sqrt / (1.0f + static_cast<float>(counts[i]));
                 }
             }
             else {
                 for (int i = 0; i < GAME_COLS; ++i) {
-                    score[i] = values_avg[i] + c_puct_ * probs[i] *
+                    score[i] = node.value_avg(i) + c_puct_ * probs[i] *
                         total_sqrt / (1.0f + static_cast<float>(counts[i]));
                 }
             }
@@ -147,15 +145,14 @@ namespace Connect4 {
     }
 
     void MCTS::search_batch(int count, int batch_size, const GameState& state,
-        Player player, Connect4Net& net, const torch::Device& device) {
+        Player player) {
         if (use_noise) dirichlet_noise = generate_dirichlet_noise();
         for (int i = 0; i < count; ++i) {
-            search_minibatch(batch_size, state, player, net, device);
+            search_minibatch(batch_size, state, player);
         }
     }
 
-    void MCTS::search_minibatch(int count, const GameState& state, Player player,
-        Connect4Net& net, const torch::Device& device) {
+    void MCTS::search_minibatch(int count, const GameState& state, Player player) {
 
         // PMR OPTIMIZATION: Stack-allocated monotonic buffer for per-batch temporary allocations.
         // 8KB is generous for a single minibatch search, preventing ANY heap allocation contention.
@@ -199,8 +196,6 @@ namespace Connect4 {
 
                             node.visit_count[actions[j]]++;
                             node.value[actions[j]] += cur_value;
-                            node.value_avg[actions[j]] = node.value[actions[j]] /
-                                static_cast<float>(node.visit_count[actions[j]]);
 
                             cur_value = -cur_value;
                         }
@@ -236,16 +231,38 @@ namespace Connect4 {
                 std::pmr::vector<std::future<std::pair<std::array<float, GAME_COLS>, float>>> futures{ alloc };
                 futures.reserve(expand_states.size());
 
-                for (size_t i = 0; i < expand_states.size(); ++i) {
-                    futures.push_back(neural_worker_->submit_query(
-                        expand_states[i], expand_players[i]));
+                if (neural_worker_) {
+                    for (size_t i = 0; i < expand_states.size(); ++i) {
+                        futures.push_back(neural_worker_->submit_query(
+                            expand_states[i], expand_players[i]));
+                    }
                 }
 
                 for (size_t i = 0; i < expand_states.size(); ++i) {
                     const auto& leaf_state = expand_states[i];
                     uint64_t leaf_key = leaf_state.key();
 
-                    auto [probs, value] = futures[i].get();
+                    std::array<float, 7> probs;
+                    float value;
+
+                    if (neural_worker_) {
+                        auto [probs_, value_] = futures[i].get();
+                        probs = probs_;
+                        value = value_;
+                    }
+                    else {
+                        int count = 0;
+                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                            probs[col] = leaf_state.canPlay(col) ? 1 : 0;
+                            count++;
+                        }
+                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                            if (count > 1e-8f) {
+                                probs[col] /= count;
+                            }
+                        }
+                        value = 0;
+                    }
 
                     if (tree_.find(leaf_key) == tree_.end()) {
                         MCTSNode node;
@@ -258,7 +275,6 @@ namespace Connect4 {
                             node.probs[j] = valid_mask[j] ? probs[j] : 0.0f;
                             node.visit_count[j] = 0;
                             node.value[j] = 0.0f;
-                            node.value_avg[j] = 0.0f;
                         }
 
                         float sum = std::accumulate(node.probs.begin(), node.probs.end(), 0.0f);
@@ -293,8 +309,6 @@ namespace Connect4 {
 
                                     node.visit_count[entry.actions[j]]++;
                                     node.value[entry.actions[j]] += cur_value;
-                                    node.value_avg[entry.actions[j]] = node.value[entry.actions[j]] /
-                                        static_cast<float>(node.visit_count[entry.actions[j]]);
 
                                     cur_value = -cur_value;
                                 }
@@ -351,7 +365,7 @@ namespace Connect4 {
             }
         }
 
-        for (int i = 0; i < GAME_COLS; ++i) values[i] = node.value_avg[i];
+        for (int i = 0; i < GAME_COLS; ++i) values[i] = node.value_avg(i);
         return { probs, values };
     }
 }

@@ -45,6 +45,14 @@ set(GAME_LOGIC_SOURCES
     "src/mcts.cpp"
     "src/model.cpp"
 )
+# --- Pascal Pons' Solver ---
+set(GAME_SOLVER_SOURCES
+    "src/solver/MoveSorter.hpp"
+    "src/solver/OpeningBook.hpp"
+    "src/solver/Solver.hpp"
+    "src/solver/Solver.cpp"
+    "src/solver/TranspositionTable.hpp"
+)
 
 # -------------------------------------------------------------
 # Helper Function: Copy DLLs to Target Directory
@@ -168,6 +176,7 @@ catch_discover_tests(Connect4Tests
 pybind11_add_module(_C 
     "${CMAKE_CURRENT_SOURCE_DIR}/src/python_bindings.cpp"
     ${GAME_LOGIC_SOURCES}
+    ${GAME_SOLVER_SOURCES}
 )
 
 target_link_libraries(_C PRIVATE 

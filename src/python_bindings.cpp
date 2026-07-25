@@ -8,9 +8,11 @@
 #include "model.h"
 #include "game_play.h"
 #include "neural_worker.h"
+#include "solver/Solver.hpp"
 
 namespace py = pybind11;
 using namespace Connect4;
+using namespace Connect4::GameSolver;
 
 // Wrapper class for GameState to expose to Python
 class PyGameState {
@@ -162,7 +164,7 @@ public:
             mcts.set_neural_worker(neural_worker_.get());
         }
         mcts.search_batch(count, batch_size, state.get_state(),
-            static_cast<Player>(player), net, device);
+            static_cast<Player>(player));
     }
 
     std::pair<std::vector<float>, std::vector<float>> get_policy_value(
@@ -187,6 +189,26 @@ public:
 private:
     MCTS mcts;
     std::unique_ptr<Connect4::NeuralWorker> neural_worker_ = nullptr;
+};
+
+class PySolver {
+public:
+    PySolver() {
+        weak = false;
+    }
+    PySolver(std::string bookPath) {
+        weak = false;
+        solver.loadBook(bookPath);
+    }
+    int solve(const PyGameState& state) {
+        return solver.solve(state.get_state(), weak);
+    }
+    std::vector<int> analyze(const PyGameState& state) {
+        return solver.analyze(state.get_state(), weak);
+    }
+private:
+    Solver solver;
+    bool weak;
 };
 
 // Module definition
@@ -234,6 +256,12 @@ PYBIND11_MODULE(_C, m) {
             py::arg("path"), py::arg("blocks"), py::arg("filters"), py::arg("device") = "cpu")
         .def("load", &PyNet::load, py::arg("path"), py::arg("device") = "cpu")
         .def("forward", &PyNet::forward);
+
+    py::class_<PySolver>(m, "Solver")
+        .def(py::init<>())
+        .def(py::init<const std::string&>())
+        .def("solve", &PySolver::solve, py::arg("state"))
+        .def("analyze", &PySolver::analyze, py::arg("state"));
 
     // make_move no longer needs the 'player' argument because the bitboard inherently knows whose turn it is!
     m.def("make_move", [](const PyGameState& state, int col) {

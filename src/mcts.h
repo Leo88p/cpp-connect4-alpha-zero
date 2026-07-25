@@ -21,8 +21,10 @@ namespace Connect4 {
     public:
         std::array<int, GAME_COLS> visit_count = { 0 };
         std::array<float, GAME_COLS> value = { 0.0f };
-        std::array<float, GAME_COLS> value_avg = { 0.0f };
         std::array<float, GAME_COLS> probs = { 0.0f };
+        float value_avg(int i) const {
+            return visit_count[i] > 0 ? value[i] / visit_count[i] : 0;
+        }
 
         MCTSNode() = default;
         MCTSNode(const MCTSNode& other) = default; // Use default copy constructor
@@ -51,10 +53,9 @@ namespace Connect4 {
         bool is_leaf(const GameState& state) const;
 
         void search_batch(int count, int batch_size, const GameState& state,
-            Player player, Connect4Net& net, const torch::Device& device);
+            Player player);
 
-        void search_minibatch(int count, const GameState& state, Player player,
-            Connect4Net& net, const torch::Device& device);
+        void search_minibatch(int count, const GameState& state, Player player);
 
         std::pair<std::array<float, GAME_COLS>, std::array<float, GAME_COLS>>
             get_policy_value(const GameState& state, float tau = 1.0f) const;

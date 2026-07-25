@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "connect4_game.h" 
 #include <iostream>
+#include "mcts.h"
 
 using namespace Connect4;
 
@@ -37,4 +38,14 @@ TEST_CASE("GameState: Win Detection (Diagonal)", "[win]") {
     bool win = state.isWinningMove(3); // Black wins
 
     REQUIRE(win == true);
+}
+
+TEST_CASE("Basic MCTS test") {
+    GameState state;
+    MCTS mcts(1, 0, 1);
+    mcts.search_batch(7, 1, state, Player::BLACK);
+    REQUIRE(mcts.size() == 7);
+    mcts.clear();
+    mcts.search_batch(7, 1, state, Player::BLACK);
+    REQUIRE(mcts.size() == 7);
 }

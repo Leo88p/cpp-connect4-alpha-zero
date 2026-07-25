@@ -19,6 +19,8 @@ namespace Connect4 {
 
     constexpr int GAME_ROWS = 6;
     constexpr int GAME_COLS = 7;
+    constexpr int MIN_SCORE = -(GAME_COLS * GAME_ROWS) / 2 + 3;
+    constexpr int MAX_SCORE = (GAME_COLS * GAME_ROWS + 1) / 2 - 3;
 
     enum class Player : uint8_t {
         WHITE = 0,
@@ -51,8 +53,44 @@ namespace Connect4 {
         bool isWinningMove(int col) const {
             return winning_position() & possible() & column_mask(col);
         }
+        int nbMoves() const {
+            return moves;
+        }
+        uint64_t key3() const {
+            uint64_t key_forward = 0;
+            for (int i = 0; i < GAME_COLS; i++) partialKey3(key_forward, i);  // compute key in increasing order of columns
 
-    private:
+            uint64_t key_reverse = 0;
+            for (int i = GAME_COLS; i--;) partialKey3(key_reverse, i);  // compute key in decreasing order of columns
+
+            return key_forward < key_reverse ? key_forward / 3 : key_reverse / 3; // take the smallest key and divide per 3 as the last base3 digit is always 0
+        }
+        void partialKey3(uint64_t& key, int col) const {
+            for (uint64_t pos = UINT64_C(1) << (col * (GAME_ROWS + 1)); pos & mask; pos <<= 1) {
+                key *= 3;
+                if (pos & current_position) key += 1;
+                else key += 2;
+            }
+            key *= 3;
+        }
+        bool canWinNext() const {
+            return winning_position() & possible();
+        }
+        uint64_t possibleNonLosingMoves() const {
+            assert(!canWinNext());
+            uint64_t possible_mask = possible();
+            uint64_t opponent_win = opponent_winning_position();
+            uint64_t forced_moves = possible_mask & opponent_win;
+            if (forced_moves) {
+                if (forced_moves & (forced_moves - 1)) // check if there is more than one forced move
+                    return 0;                           // the opponnent has two winning moves and you cannot stop him
+                else possible_mask = forced_moves;    // enforce to play the single forced move
+            }
+            return possible_mask & ~(opponent_win >> 1);  // avoid to play below an opponent winning spot
+        }
+        uint64_t opponent_winning_position() const {
+            return compute_winning_position(current_position ^ mask, mask);
+        }
         static constexpr uint64_t bottom_mask_col(int col) {
             return UINT64_C(1) << col * (GAME_ROWS + 1);
         }
@@ -64,6 +102,11 @@ namespace Connect4 {
         }
         const static uint64_t bottom_mask = bottom(GAME_COLS, GAME_ROWS);
         const static uint64_t board_mask = bottom_mask * ((1LL << GAME_ROWS) - 1);
+        int moveScore(uint64_t move) const {
+            return popcount(compute_winning_position(current_position | move, mask));
+        }
+
+    private:
         uint64_t winning_position() const {
             return compute_winning_position(current_position, mask);
         }
@@ -96,6 +139,11 @@ namespace Connect4 {
             r |= p & (position >> 3 * (GAME_ROWS + 2));
 
             return r & (board_mask ^ mask);
+        }
+        static unsigned int popcount(uint64_t m) {
+            unsigned int c = 0;
+            for (c = 0; m; c++) m &= m - 1;
+            return c;
         }
     };
 
