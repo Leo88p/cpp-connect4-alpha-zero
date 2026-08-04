@@ -34,7 +34,7 @@ namespace Connect4 {
 
     class MCTS {
     public:
-        explicit MCTS(float c_puct = 1.0f, float c_fpu = 0.25f, float virtual_loss = 2.0f);
+        explicit MCTS(float c_puct = 1.0f, float dirichlet_alpha = 1.0f, float virtual_loss = 2.0f);
         MCTS(const MCTS&) = delete;
         MCTS& operator=(const MCTS&) = delete;
         MCTS(MCTS&&) = default;
@@ -63,6 +63,7 @@ namespace Connect4 {
         void set_neural_worker(NeuralWorker* worker) {
             neural_worker_ = worker;
         }
+        void set_c_puct(float new_c_puct) { c_puct_ = new_c_puct; }
 
     private:
         // Lock-free, thread-safe (when used by a single thread) memory pool for the tree
@@ -71,7 +72,7 @@ namespace Connect4 {
         // PMR-enabled unordered map
         std::pmr::unordered_map<uint64_t, MCTSNode> tree_;
         float c_puct_;
-        float c_fpu_;
+        float dirichlet_alpha;
         float virtual_loss_;
 
         // Random number generation for Dirichlet noise

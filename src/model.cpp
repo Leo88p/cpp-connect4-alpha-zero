@@ -34,7 +34,7 @@ namespace Connect4 {
     Connect4NetImpl::Connect4NetImpl(int num_blocks, int num_filters) {
         // Input shape: (2, 6, 7)
         conv_in = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(2, num_filters, 3).padding(1)),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(4, num_filters, 3).padding(1)),
             torch::nn::BatchNorm2d(num_filters),
             torch::nn::LeakyReLU()
         );
@@ -46,8 +46,8 @@ namespace Connect4 {
 
         // Value head
         conv_val = torch::nn::Sequential(
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(num_filters, 32, 1)),
-            torch::nn::BatchNorm2d(32),
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(num_filters, 64, 1)),
+            torch::nn::BatchNorm2d(64),
             torch::nn::LeakyReLU(),
             torch::nn::Flatten()
         );
@@ -76,12 +76,16 @@ namespace Connect4 {
             policy_size = conv_policy->forward(dummy).size(1);
         }
 
-        val_linear1 = torch::nn::Linear(val_size, 128);
-        val_linear2 = torch::nn::Linear(128, 1);
+        val_linear1 = torch::nn::Linear(val_size, 256);
+        val_bn1 = torch::nn::BatchNorm1d(256);
+        val_linear2 = torch::nn::Linear(256, 64);
+        val_linear3 = torch::nn::Linear(64, 1);
         policy_linear = torch::nn::Linear(policy_size, GAME_COLS);
 
         register_module("val_linear1", val_linear1);
+        register_module("val_bn1", val_bn1);
         register_module("val_linear2", val_linear2);
+        register_module("val_linear3", val_linear3);
         register_module("policy_linear", policy_linear);
     }
 
@@ -95,9 +99,11 @@ namespace Connect4 {
 
         // Value head
         torch::Tensor val = conv_val->forward(x);
-        val = torch::leaky_relu(val_linear1->forward(val));
-        //val = torch::leaky_relu(val_linear2->forward(val));
-        val = torch::tanh(val_linear2->forward(val));
+        val = val_linear1->forward(val);
+        val = val_bn1->forward(val);
+        val = torch::leaky_relu(val);
+        val = torch::leaky_relu(val_linear2->forward(val));
+        val = torch::tanh(val_linear3->forward(val));
 
         // Policy head
         torch::Tensor pol = conv_policy->forward(x);
@@ -115,7 +121,7 @@ namespace Connect4 {
 
         float* ptr = cpu_buffer.data_ptr<float>();
         const int channel_stride = Connect4::GAME_ROWS * Connect4::GAME_COLS; // 6 * 7 = 42
-        const int sample_stride = 2 * channel_stride;
+        const int sample_stride = 4 * channel_stride;
 
         for (size_t idx = 0; idx < states.size(); ++idx) {
             const auto& state = states[idx];
@@ -126,13 +132,18 @@ namespace Connect4 {
             // We completely ignore 'who_moves' because the bitboard already knows!
             uint64_t our_pieces = state.current_position;
             uint64_t their_pieces = state.mask ^ state.current_position;
+            uint64_t last_move = state.lastMove;
 
             float* our_plane = ptr + idx * sample_stride + 0 * channel_stride;
             float* their_plane = ptr + idx * sample_stride + 1 * channel_stride;
+            float* player_plane = ptr + idx * sample_stride + 2 * channel_stride;
+            float* last_plane = ptr + idx * sample_stride + 3 * channel_stride;
 
             // Zero out planes (CPU-safe and fast)
             std::memset(our_plane, 0, channel_stride * sizeof(float));
             std::memset(their_plane, 0, channel_stride * sizeof(float));
+            std::memset(player_plane, 0, channel_stride * sizeof(float));
+            std::memset(last_plane, 0, channel_stride * sizeof(float));
 
             // Unpack bits to the 6x7 grid.
             // Pascal Pons' layout is column-major with a 1-bit guard per column (stride = 7).
@@ -152,6 +163,10 @@ namespace Connect4 {
                     if (their_pieces & (1ULL << pos)) {
                         their_plane[tensor_idx] = 1.0f;
                     }
+                    if (last_move & (1ULL << pos)) {
+                        last_plane[tensor_idx] = 1.0f;
+                    }
+                    player_plane[tensor_idx] = state.nbMoves() % 2;
                 }
             }
         }

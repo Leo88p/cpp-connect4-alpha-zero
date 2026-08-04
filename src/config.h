@@ -43,6 +43,8 @@ namespace Connect4 {
         int mcts_batch_size = 32;
         int adjusted_idx_1 = 20;
         int adjusted_idx_2 = 100;
+        int adjusted_idx_3 = 200;
+        int adjusted_idx_4 = 300;
         int batch_size = 2048;
         int train_rounds = 30;
         int steps_before_tau_0 = 10;
@@ -57,9 +59,11 @@ namespace Connect4 {
         float learning_rate = 0.2f;
         float learning_rate_adjusted_1 = 0.02f;
         float learning_rate_adjusted_2 = 0.002f;
+        float learning_rate_adjusted_3 = 0.0002f;
+        float learning_rate_adjusted_4 = 0.00002f;
         float virtual_loss = 2.0f;
         float c_puct = 1.0f;
-        float c_fpu = 0.25f;
+        float dirichlet_alpha = 0.25f;
 
         void loadFromFile(const std::string& filename);
     };
@@ -100,6 +104,8 @@ namespace Connect4 {
                 else if (key == "mcts_batch_size") mcts_batch_size = std::stoi(value);
                 else if (key == "adjusted_idx_1") adjusted_idx_1 = std::stoi(value);
                 else if (key == "adjusted_idx_2") adjusted_idx_2 = std::stoi(value);
+                else if (key == "adjusted_idx_3") adjusted_idx_3 = std::stoi(value);
+                else if (key == "adjusted_idx_4") adjusted_idx_4 = std::stoi(value);
                 else if (key == "batch_size") batch_size = std::stoi(value);
                 else if (key == "train_rounds") train_rounds = std::stoi(value);
                 else if (key == "steps_before_tau_0") steps_before_tau_0 = std::stoi(value);
@@ -112,9 +118,11 @@ namespace Connect4 {
                 else if (key == "learning_rate") learning_rate = safe_stof(value);
                 else if (key == "learning_rate_adjusted_1") learning_rate_adjusted_1 = safe_stof(value);
                 else if (key == "learning_rate_adjusted_2") learning_rate_adjusted_2 = safe_stof(value);
+                else if (key == "learning_rate_adjusted_3") learning_rate_adjusted_3 = safe_stof(value);
+                else if (key == "learning_rate_adjusted_4") learning_rate_adjusted_4 = safe_stof(value);
                 else if (key == "virtual_loss") virtual_loss = safe_stof(value);
                 else if (key == "c_puct") c_puct = safe_stof(value);
-                else if (key == "c_fpu") c_fpu = safe_stof(value);
+                else if (key == "dirichlet_alpha") dirichlet_alpha = safe_stof(value);
 
                 else {
                     std::cerr << "Warning: Unknown key '" << key << "' at line " << line_num << "\n";

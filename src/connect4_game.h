@@ -32,6 +32,8 @@ namespace Connect4 {
         uint64_t current_position;
         uint64_t mask;
         unsigned int moves;
+        uint64_t lastMove = 0;
+        uint64_t lastMove2 = 0;
         GameState(): current_position{ 0 }, mask{ 0 }, moves{ 0 } {}
         uint64_t key() const {
             return current_position + mask;
@@ -43,6 +45,8 @@ namespace Connect4 {
             current_position ^= mask;
             mask |= move;
             moves++;
+            lastMove2 = lastMove;
+            lastMove = move;
         }
         bool canPlay(int col) const {
             return (mask & top_mask_col(col)) == 0;
@@ -87,6 +91,17 @@ namespace Connect4 {
                 else possible_mask = forced_moves;    // enforce to play the single forced move
             }
             return possible_mask & ~(opponent_win >> 1);  // avoid to play below an opponent winning spot
+        }
+        bool canPlayNonLosingMove(int col) const {
+            if (!canPlay(col)) {
+                return false;
+            }
+            if (canWinNext()) {
+                return isWinningMove(col);
+            }
+            uint64_t non_losing_mask = possibleNonLosingMoves();
+            uint64_t col_bit = ((mask + bottom_mask) & board_mask) & column_mask(col);
+            return (col_bit & non_losing_mask) != 0;
         }
         uint64_t opponent_winning_position() const {
             return compute_winning_position(current_position ^ mask, mask);

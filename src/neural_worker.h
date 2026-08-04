@@ -53,13 +53,13 @@ namespace Connect4 {
 
                 // 1. PINNED CPU buffer (zero-copy async H2D compatible)
                 cpu_staging_buffer_ = torch::empty(
-                    { batch_size_, 2, GAME_ROWS, GAME_COLS },
+                    { batch_size_, 4, GAME_ROWS, GAME_COLS },
                     torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true)
                 );
 
                 // 2. GPU buffer for inference
                 gpu_input_buffer_ = torch::empty(
-                    { batch_size_, 2, GAME_ROWS, GAME_COLS },
+                    { batch_size_, 4, GAME_ROWS, GAME_COLS },
                     torch::TensorOptions().dtype(torch::kFloat32).device(device_)
                 );
 

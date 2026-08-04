@@ -33,8 +33,10 @@ namespace Connect4 {
         torch::nn::ModuleList residual_blocks;
 
         torch::nn::Sequential conv_val = nullptr;
+        torch::nn::BatchNorm1d val_bn1 = nullptr;
         torch::nn::Linear val_linear1 = nullptr;
         torch::nn::Linear val_linear2 = nullptr;
+        torch::nn::Linear val_linear3 = nullptr;
 
         torch::nn::Sequential conv_policy = nullptr;
         torch::nn::Linear policy_linear = nullptr;

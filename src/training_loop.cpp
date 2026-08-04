@@ -34,6 +34,7 @@ using namespace Connect4;
 // Global flag for termination handling
 std::atomic<bool> terminate_requested(false);
 std::atomic<bool> saving_checkpoint(false);
+std::stop_source stop_src; // C++20: Manages graceful shutdown signals
 
 // Add this class (minimal thread pool):
 class ThreadPool {
@@ -233,8 +234,8 @@ int main(int argc, char** argv) {
     // Print network architecture
     std::cout << *net << std::endl;
 
-    torch::optim::SGDOptions sgd_opts = torch::optim::SGDOptions(cfg.learning_rate).momentum(0.9).weight_decay(1e-4);
-    torch::optim::SGD optimizer(net->parameters(), sgd_opts);
+    torch::optim::AdamWOptions adamw_opts = torch::optim::AdamWOptions(cfg.learning_rate).weight_decay(1e-4);
+    torch::optim::AdamW optimizer(net->parameters(), adamw_opts);
 
     // Replay buffer
     ReplayBuffer replay_buffer;
@@ -275,63 +276,75 @@ int main(int argc, char** argv) {
         if (terminate_requested) break;
 
         auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, cfg.parallel_games * cfg.mcts_batch_size);
-        net->eval(); 
+        net->eval();
+        std::atomic<int> atomic_game_steps{ 0 };
+        std::atomic<int> atomic_total_leaves{ 0 };
         {
             torch::NoGradGuard no_grad;
+
+            // Pre-allocate MCTS instances for each persistent worker
             std::vector<std::unique_ptr<MCTS>> all_mcts;
-            all_mcts.reserve(cfg.parallel_games * 2);
-            for (int i = 0; i < cfg.parallel_games * 2; ++i) {
-                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.c_fpu, cfg.virtual_loss));
-            }
-            for (auto& mcts_ptr : all_mcts) {
-                mcts_ptr->set_neural_worker(neural_worker.get());
+            all_mcts.reserve(cfg.parallel_games); 
+            for (int i = 0; i < cfg.parallel_games; ++i) {
+                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.dirichlet_alpha, cfg.virtual_loss));
+                all_mcts.back()->set_neural_worker(neural_worker.get());
             }
 
             std::mutex replay_mutex;
 
-            for (int episode_start = 0; episode_start < cfg.play_episodes && !terminate_requested; episode_start += cfg.parallel_games) {
-                int batch_games = std::min(cfg.parallel_games, cfg.play_episodes - episode_start);
+            // Atomic counters to avoid main-thread aggregation bottlenecks
+            std::atomic<int> next_episode{ 0 };
 
-                std::vector<std::future<std::pair<int, int>>> futures;
-                std::vector<std::vector<ReplayBuffer::value_type>> local_buffers(batch_games);
+            // 1. Spawn persistent workers dynamically
+            std::vector<std::jthread> workers;
+            workers.reserve(cfg.parallel_games);
 
-                for (int i = 0; i < batch_games; ++i) {
-                    futures.push_back(pool.enqueue(
-                        [&, i, episode_idx = episode_start + i]() -> std::pair<int, int> {
+            for (int worker_id = 0; worker_id < cfg.parallel_games; ++worker_id) {
+                workers.emplace_back([&, worker_id](std::stop_token st) {
+                    // Each worker gets its own local buffer to minimize lock contention
+                    std::vector<ReplayBuffer::value_type> local_buffer;
+                    local_buffer.reserve(84);
 
-                            // Запускаем игру, передавая локальный буфер
-                            auto [game_result, steps] = play_game(
-                                &all_mcts[i * 2], &local_buffers[i],
-                                net, net,
-                                cfg.steps_before_tau_0, cfg.mcts_batches, cfg.mcts_batch_size,
-                                std::nullopt, device
-                            );
+                    while (!st.stop_requested()) {
+                        // Dynamic allocation: completed tasks immediately trigger new assignments
+                        int episode_idx = next_episode.fetch_add(1, std::memory_order_relaxed);
 
-                            int leaves = static_cast<int>(all_mcts[i * 2]->size());
-                            return { steps, leaves };
+                        if (episode_idx >= cfg.play_episodes) {
+                            break; // No more games to play
                         }
-                    ));
-                }
 
-                for (int i = 0; i < batch_games; ++i) {
-                    auto [steps, leaves] = futures[i].get();
-                    game_steps += steps;
-                    total_leaves += leaves;
-                }
+                        auto [game_result, steps] = play_game(
+                            &all_mcts[worker_id],
+                            &local_buffer,
+                            net, net,
+                            cfg.steps_before_tau_0, cfg.mcts_batches, cfg.mcts_batch_size,
+                            std::nullopt, device
+                        );
 
-                {
-                    std::lock_guard<std::mutex> lock(replay_mutex);
-                    for (const auto& local_buffer : local_buffers) {
-                        for (const auto& exp : local_buffer) {
-                            replay_buffer.push_back(exp);
-                            if (replay_buffer.size() > cfg.replay_buffer_size) {
-                                replay_buffer.pop_front();
+                        // 2. Fine-grained locking: Only lock when pushing the completed batch
+                        {
+                            std::lock_guard<std::mutex> lock(replay_mutex);
+                            for (const auto& exp : local_buffer) {
+                                replay_buffer.push_back(exp);
+                                if (replay_buffer.size() > cfg.replay_buffer_size) {
+                                    replay_buffer.pop_front();
+                                }
                             }
                         }
+                        local_buffer.clear(); // Reuse capacity for the next game
+
+                        // 3. Lock-free stat aggregation
+                        atomic_game_steps.fetch_add(steps, std::memory_order_relaxed);
+                        atomic_total_leaves.fetch_add(static_cast<int>(all_mcts[worker_id]->size()), std::memory_order_relaxed);
                     }
-                }
+                    });
             }
         }
+
+        // After the scope closes, all jthreads are safely joined. 
+        // You can now read the final aggregated stats:
+        game_steps = atomic_game_steps.load(std::memory_order_relaxed);
+        total_leaves = atomic_total_leaves.load(std::memory_order_relaxed);
         net->train();
 
         size_t game_nodes = total_leaves;
@@ -352,7 +365,7 @@ int main(int argc, char** argv) {
             << ", replay " << replay_buffer.size() << std::endl;
 
         step_idx++;
-        auto update_optimizer_lr = [&](float new_lr) {
+        /*auto update_optimizer_lr = [&](float new_lr) {
             for (auto& param_group : optimizer.param_groups()) {
                 static_cast<torch::optim::SGDOptions&>(param_group.options()).lr(new_lr);
             }
@@ -367,6 +380,14 @@ int main(int argc, char** argv) {
             cfg.learning_rate = cfg.learning_rate_adjusted_2;
             update_optimizer_lr(cfg.learning_rate);
         }
+        if (step_idx == cfg.adjusted_idx_3) {
+            cfg.learning_rate = cfg.learning_rate_adjusted_3;
+            update_optimizer_lr(cfg.learning_rate);
+        }
+        if (step_idx == cfg.adjusted_idx_4) {
+            cfg.learning_rate = cfg.learning_rate_adjusted_4;
+            update_optimizer_lr(cfg.learning_rate);
+        } */
 
         // Check for termination after episodes
         if (terminate_requested) break;
@@ -438,7 +459,7 @@ int main(int argc, char** argv) {
                 std::cout << "Avg policy target entropy: " << avg_entropy << std::endl;
             }
             // Convert to tensors
-            auto states_v = torch::empty({ cfg.batch_size, 2, GAME_ROWS, GAME_COLS }, torch::kFloat32);
+            auto states_v = torch::empty({ cfg.batch_size, 4, GAME_ROWS, GAME_COLS }, torch::kFloat32);
             state_lists_to_batches(states_v, batch_states, batch_who_moves);
             // Convert probs and values to tensors
             torch::Tensor probs_v = torch::zeros({ static_cast<int64_t>(cfg.batch_size), GAME_COLS }, torch::kFloat32);
@@ -469,7 +490,7 @@ int main(int argc, char** argv) {
             loss_policy_v = loss_policy_v.sum(1).mean();
 
 
-            auto loss_v = loss_policy_v + loss_value_v;
+            auto loss_v = loss_policy_v + 1.5 * loss_value_v;
             loss_v.backward();
 
             torch::nn::utils::clip_grad_norm_(net->parameters(), 1.0);

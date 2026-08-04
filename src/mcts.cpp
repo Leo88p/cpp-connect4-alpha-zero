@@ -24,12 +24,12 @@ namespace Connect4 {
         std::fill(probs.begin(), probs.end(), 0.0f);
     }
 
-    MCTS::MCTS(float c_puct, float c_fpu, float virtual_loss)
-        : c_puct_(c_puct), c_fpu_(c_fpu), virtual_loss_(virtual_loss),
+    MCTS::MCTS(float c_puct, float dirichlet_alpha, float virtual_loss)
+        : c_puct_(c_puct), dirichlet_alpha(dirichlet_alpha), virtual_loss_(virtual_loss),
         tree_(&pool_resource_) { // Bind the map to the lock-free pool resource
         std::random_device rd;
         rng_.seed(rd());
-        dirichlet_dist_ = std::gamma_distribution<float>(1.4f, 1.0f);
+        dirichlet_dist_ = std::gamma_distribution<float>(dirichlet_alpha, 1.0f);
         tree_.reserve(10000);
     }
 
@@ -77,23 +77,49 @@ namespace Connect4 {
             std::array<float, GAME_COLS> score;
             const auto& probs = node.probs;
             const auto& counts = node.visit_count;
+            int winningMovesCount = 0;
 
-            if (cur_state.key() == root_state.key() && use_noise) {
+            for (int i = 0; i < GAME_COLS; ++i) {
+                if (cur_state.isWinningMove(i)) {
+                    winningMovesCount++;
+                    score[i] = 1;
+                }
+                else {
+                    score[i] = 0;
+                }
+            }
+            if (winningMovesCount > 0) {
                 for (int i = 0; i < GAME_COLS; ++i) {
-                    score[i] = node.value_avg(i) + c_puct_ * (0.75f * probs[i] + 0.25f * dirichlet_noise[i]) *
-                        total_sqrt / (1.0f + static_cast<float>(counts[i]));
+                    score[i] /= winningMovesCount;
                 }
             }
             else {
-                for (int i = 0; i < GAME_COLS; ++i) {
-                    score[i] = node.value_avg(i) + c_puct_ * probs[i] *
-                        total_sqrt / (1.0f + static_cast<float>(counts[i]));
+                if (cur_state.key() == root_state.key() && use_noise) {
+                    for (int i = 0; i < GAME_COLS; ++i) {
+                        score[i] = node.value_avg(i) + c_puct_ * (0.85f * probs[i] + 0.15f * dirichlet_noise[i]) *
+                            total_sqrt / (1.0f + static_cast<float>(counts[i]));
+                    }
+                }
+                else {
+                    for (int i = 0; i < GAME_COLS; ++i) {
+                        score[i] = node.value_avg(i) + c_puct_ * probs[i] *
+                            total_sqrt / (1.0f + static_cast<float>(counts[i]));
+                    }
                 }
             }
 
             std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
+            int nonLosingCount = 0;
             for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                valid_mask[col] = cur_state.canPlay(col);
+                valid_mask[col] = cur_state.canPlayNonLosingMove(col);
+                if (valid_mask[col]) {
+                    nonLosingCount++;
+                }
+            }
+            if (nonLosingCount == 0) {
+                for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                    valid_mask[col] = cur_state.canPlay(col);
+                }
             }
 
             int best_action = -1;
@@ -153,17 +179,14 @@ namespace Connect4 {
     }
 
     void MCTS::search_minibatch(int count, const GameState& state, Player player) {
-
-        // PMR OPTIMIZATION: Stack-allocated monotonic buffer for per-batch temporary allocations.
-        // 8KB is generous for a single minibatch search, preventing ANY heap allocation contention.
-        alignas(64) std::byte temp_buffer[8192];
+        // FIX 1: Increased buffer from 8KB to 64KB to prevent silent heap fallback 
+        // during large minibatch constructions.
+        alignas(64) std::byte temp_buffer[65536];
         std::pmr::monotonic_buffer_resource mbr{ temp_buffer, sizeof(temp_buffer), std::pmr::new_delete_resource() };
         std::pmr::polymorphic_allocator<void> alloc(&mbr);
 
-        std::pmr::unordered_map<uint64_t, std::pmr::vector<BackupEntry>> pending_backups{ alloc };
-        std::pmr::vector<GameState> expand_states{ alloc };
-        std::pmr::vector<Player> expand_players{ alloc };
-        std::pmr::unordered_set<uint64_t> planned{ alloc };
+        // Track pending NN queries: state_key -> (leaf_state, player, backup_entries)
+        std::pmr::unordered_map<uint64_t, std::tuple<GameState, Player, std::pmr::vector<BackupEntry>>> pending_queries{ alloc };
 
         for (int i = 0; i < count; ++i) {
             try {
@@ -173,26 +196,25 @@ namespace Connect4 {
                     find_leaf(state, player, &virtual_loss_path, alloc);
 
                 if (!std::isnan(value)) {
-                    float terminal_value = value;
-                    float cur_value = -terminal_value;
+                    // Terminal state: back up immediately
 
+                    // FIX 2: Decouple virtual loss reversion from the states loop.
+                    // Revert ALL virtual losses first (including the leaf node if it was added to the path).
+                    for (auto& [key, action] : virtual_loss_path) {
+                        if (tree_.find(key) != tree_.end()) {
+                            tree_[key].value[action] += virtual_loss_;
+                            tree_[key].visit_count[action]--;
+                        }
+                    }
+
+                    // Now back up the true terminal value
+                    float cur_value = -value;
                     for (int j = static_cast<int>(states.size()) - 1; j >= 0; --j) {
                         if (j < static_cast<int>(actions.size()) &&
                             actions[j] >= 0 && actions[j] < GAME_COLS) {
 
                             uint64_t state_key = states[j].key();
-                            if (tree_.find(state_key) == tree_.end()) {
-                                tree_[state_key] = MCTSNode();
-                            }
                             auto& node = tree_[state_key];
-
-                            if (!virtual_loss_path.empty() &&
-                                virtual_loss_path.back().first == state_key &&
-                                virtual_loss_path.back().second == actions[j]) {
-                                node.value[actions[j]] += virtual_loss_;
-                                node.visit_count[actions[j]]--;
-                                virtual_loss_path.pop_back();
-                            }
 
                             node.visit_count[actions[j]]++;
                             node.value[actions[j]] += cur_value;
@@ -204,20 +226,65 @@ namespace Connect4 {
                 else {
                     uint64_t leaf_key = leaf_state.key();
 
-                    // Construct BackupEntry with the monotonic allocator
-                    pending_backups[leaf_key].emplace_back(alloc);
-                    auto& new_entry = pending_backups[leaf_key].back();
+                    // CRITICAL: Immediately add leaf to tree with default policy
+                    if (tree_.find(leaf_key) == tree_.end()) {
+                        MCTSNode node;
+                        int valid_count = 0; // FIX 3: Properly count ONLY valid moves
+                        std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
+                        int nonLosingCount = 0;
+                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                            valid_mask[col] = leaf_state.canPlayNonLosingMove(col);
+                            if (valid_mask[col]) {
+                                nonLosingCount++;
+                            }
+                        }
+                        if (nonLosingCount == 0) {
+                            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                                valid_mask[col] = leaf_state.canPlay(col);
+                                valid_count++;
+                            }
+                        }
+                        else {
+                            valid_count = nonLosingCount;
+                        }
 
-                    // Move assignment is O(1) pointer swap because allocators match
+                        // Check for immediate win
+                        int winning_move = -1;
+                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                            if (valid_mask[col] && leaf_state.isWinningMove(col)) {
+                                winning_move = col;
+                                break;
+                            }
+                        }
+
+                        for (int j = 0; j < GAME_COLS; ++j) {
+                            if (winning_move != -1) {
+                                node.probs[j] = (j == winning_move) ? 1.0f : 0.0f;
+                            }
+                            else {
+                                node.probs[j] = valid_mask[j] ? (1.0f / valid_count) : 0.0f;
+                            }
+                            node.visit_count[j] = 0;
+                            node.value[j] = 0.0f;
+                        }
+
+                        tree_[leaf_key] = std::move(node);
+                    }
+
+                    // Queue this leaf for NN evaluation (if not already queued)
+                    if (pending_queries.find(leaf_key) == pending_queries.end()) {
+                        pending_queries[leaf_key] = std::make_tuple(
+                            leaf_state, leaf_player, std::pmr::vector<BackupEntry>{alloc}
+                        );
+                    }
+
+                    // Add backup entry to the pending query
+                    auto& [_, __, backups] = pending_queries[leaf_key];
+                    backups.emplace_back(alloc);
+                    auto& new_entry = backups.back();
                     new_entry.states = std::move(states);
                     new_entry.actions = std::move(actions);
                     new_entry.virtual_loss_path = std::move(virtual_loss_path);
-
-                    if (planned.find(leaf_key) == planned.end()) {
-                        planned.insert(leaf_key);
-                        expand_states.push_back(leaf_state);
-                        expand_players.push_back(leaf_player);
-                    }
                 }
             }
             catch (const std::exception& e) {
@@ -226,23 +293,27 @@ namespace Connect4 {
             }
         }
 
-        if (!expand_states.empty()) {
+        // Now send all unique leaves to the neural network in one batch
+        if (!pending_queries.empty()) {
             try {
                 std::pmr::vector<std::future<std::pair<std::array<float, GAME_COLS>, float>>> futures{ alloc };
-                futures.reserve(expand_states.size());
+                std::pmr::vector<uint64_t> query_keys{ alloc };
+                futures.reserve(pending_queries.size());
 
-                if (neural_worker_) {
-                    for (size_t i = 0; i < expand_states.size(); ++i) {
-                        futures.push_back(neural_worker_->submit_query(
-                            expand_states[i], expand_players[i]));
+                for (auto& [leaf_key, data] : pending_queries) {
+                    auto& [leaf_state, leaf_player, _] = data;
+                    if (neural_worker_) {
+                        futures.push_back(neural_worker_->submit_query(leaf_state, leaf_player));
                     }
+                    query_keys.push_back(leaf_key);
                 }
 
-                for (size_t i = 0; i < expand_states.size(); ++i) {
-                    const auto& leaf_state = expand_states[i];
-                    uint64_t leaf_key = leaf_state.key();
+                // Process NN responses
+                for (size_t i = 0; i < query_keys.size(); ++i) {
+                    uint64_t leaf_key = query_keys[i];
+                    auto& [leaf_state, leaf_player, backups] = pending_queries[leaf_key];
 
-                    std::array<float, 7> probs;
+                    std::array<float, GAME_COLS> probs;
                     float value;
 
                     if (neural_worker_) {
@@ -251,76 +322,119 @@ namespace Connect4 {
                         value = value_;
                     }
                     else {
-                        int count = 0;
+                        // FIX 4: Fallback uniform policy now correctly counts ONLY valid moves
+                        int valid_count = 0;
+                        int nonLosingCount = 0;
                         for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            probs[col] = leaf_state.canPlay(col) ? 1 : 0;
-                            count++;
-                        }
-                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            if (count > 1e-8f) {
-                                probs[col] /= count;
+                            if (leaf_state.canPlayNonLosingMove(col)) {
+                                probs[col] = 1.0f;
+                                nonLosingCount++;
+                            }
+                            else {
+                                probs[col] = 0.0f;
                             }
                         }
-                        value = 0;
-                    }
-
-                    if (tree_.find(leaf_key) == tree_.end()) {
-                        MCTSNode node;
-                        std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
-                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            valid_mask[col] = leaf_state.canPlay(col);
-                        }
-
-                        for (int j = 0; j < GAME_COLS; ++j) {
-                            node.probs[j] = valid_mask[j] ? probs[j] : 0.0f;
-                            node.visit_count[j] = 0;
-                            node.value[j] = 0.0f;
-                        }
-
-                        float sum = std::accumulate(node.probs.begin(), node.probs.end(), 0.0f);
-                        if (sum > 1e-8f) {
-                            for (float& p : node.probs) p /= sum;
-                        }
-                        tree_[leaf_key] = std::move(node);
-                    }
-
-                    auto it = pending_backups.find(leaf_key);
-                    if (it != pending_backups.end()) {
-                        for (auto& entry : it->second) {
-                            float cur_value = -value;
-
-                            for (int j = static_cast<int>(entry.states.size()) - 1; j >= 0; --j) {
-                                if (j < static_cast<int>(entry.actions.size()) &&
-                                    entry.actions[j] >= 0 && entry.actions[j] < GAME_COLS) {
-
-                                    uint64_t state_key = entry.states[j].key();
-                                    if (tree_.find(state_key) == tree_.end()) {
-                                        tree_[state_key] = MCTSNode();
-                                    }
-                                    auto& node = tree_[state_key];
-
-                                    if (!entry.virtual_loss_path.empty() &&
-                                        entry.virtual_loss_path.back().first == state_key &&
-                                        entry.virtual_loss_path.back().second == entry.actions[j]) {
-                                        node.value[entry.actions[j]] += virtual_loss_;
-                                        node.visit_count[entry.actions[j]]--;
-                                        entry.virtual_loss_path.pop_back();
-                                    }
-
-                                    node.visit_count[entry.actions[j]]++;
-                                    node.value[entry.actions[j]] += cur_value;
-
-                                    cur_value = -cur_value;
+                        if (nonLosingCount == 0) {
+                            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                                if (leaf_state.canPlay(col)) {
+                                    probs[col] = 1.0f;
+                                    valid_count++;
+                                }
+                                else {
+                                    probs[col] = 0.0f;
                                 }
                             }
                         }
-                        pending_backups.erase(it);
+                        else {
+                            valid_count = nonLosingCount;
+                        }
+                        if (valid_count > 0) {
+                            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                                probs[col] /= valid_count;
+                            }
+                        }
+                        value = 0.0f;
+                    }
+
+                    // Update the node with real NN values
+                    auto& node = tree_[leaf_key];
+                    std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
+                    int nonLosingCount = 0;
+                    for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                        valid_mask[col] = leaf_state.canPlayNonLosingMove(col);
+                        if (valid_mask[col]) {
+                            nonLosingCount++;
+                        }
+                    }
+                    if (nonLosingCount == 0) {
+                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                            valid_mask[col] = leaf_state.canPlay(col);
+                        }
+                    }
+
+                    // Check for immediate win (override NN if needed)
+                    int winning_move = -1;
+                    for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                        if (valid_mask[col] && leaf_state.isWinningMove(col)) {
+                            winning_move = col;
+                            break;
+                        }
+                    }
+
+                    if (winning_move != -1) {
+                        // FIX 5: Force value to 1.0 for the current player if they have a guaranteed win.
+                        // Leaving the raw NN value here causes contradictory policy/value signals.
+                        value = 1.0f;
+                        for (int j = 0; j < GAME_COLS; ++j) {
+                            node.probs[j] = (j == winning_move) ? 1.0f : 0.0f;
+                        }
+                    }
+                    else {
+                        for (int j = 0; j < GAME_COLS; ++j) {
+                            node.probs[j] = valid_mask[j] ? probs[j] : 0.0f;
+                        }
+                    }
+
+                    // Normalize probabilities
+                    float sum = std::accumulate(node.probs.begin(), node.probs.end(), 0.0f);
+                    if (sum > 1e-8f) {
+                        for (float& p : node.probs) p /= sum;
+                    }
+
+                    // Back up values through all backup entries for this leaf
+                    for (auto& entry : backups) {
+                        // FIX 6: Decouple virtual loss reversion from the backup loop.
+                        // Revert ALL virtual losses first, guaranteeing the leaf node is cleaned up.
+                        for (auto& [key, action] : entry.virtual_loss_path) {
+                            if (tree_.find(key) != tree_.end()) {
+                                tree_[key].value[action] += virtual_loss_;
+                                tree_[key].visit_count[action]--;
+                            }
+                        }
+
+                        // Now back up the true value
+                        float cur_value = -value;
+                        for (int j = static_cast<int>(entry.states.size()) - 1; j >= 0; --j) {
+                            if (j < static_cast<int>(entry.actions.size()) &&
+                                entry.actions[j] >= 0 && entry.actions[j] < GAME_COLS) {
+
+                                uint64_t state_key = entry.states[j].key();
+                                auto& backup_node = tree_[state_key];
+
+                                backup_node.visit_count[entry.actions[j]]++;
+                                backup_node.value[entry.actions[j]] += cur_value;
+
+                                cur_value = -cur_value;
+                            }
+                        }
                     }
                 }
             }
             catch (const std::exception& e) {
                 std::cerr << "Neural network expansion error: " << e.what() << std::endl;
-                for (auto& [leaf_key, backups] : pending_backups) {
+                // Revert virtual loss on error
+                for (auto& [leaf_key, data] : pending_queries) {
+                    auto& [_, __, backups] = data;
                     for (auto& entry : backups) {
                         for (auto& [key, action] : entry.virtual_loss_path) {
                             if (tree_.find(key) != tree_.end()) {

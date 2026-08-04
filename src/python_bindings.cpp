@@ -150,8 +150,8 @@ private:
 // Wrapper for MCTS
 class PyMCTS {
 public:
-    PyMCTS(float c_puct = 1.0f, float c_fpu = 0.25f, float virtual_loss = 2.0f)
-        : mcts(c_puct, c_fpu, virtual_loss) {
+    PyMCTS(float c_puct = 1.0f, float dirichlet_alpha = 1.0f, float virtual_loss = 2.0f)
+        : mcts(c_puct, dirichlet_alpha, virtual_loss) {
         mcts.use_noise = false;
     }
 
