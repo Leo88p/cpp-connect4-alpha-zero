@@ -275,7 +275,7 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, cfg.parallel_games * cfg.mcts_batch_size);
+        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, 12 * cfg.mcts_batch_size);
         net->eval();
         std::atomic<int> atomic_game_steps{ 0 };
         std::atomic<int> atomic_total_leaves{ 0 };
@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
             std::vector<std::unique_ptr<MCTS>> all_mcts;
             all_mcts.reserve(cfg.parallel_games); 
             for (int i = 0; i < cfg.parallel_games; ++i) {
-                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.dirichlet_alpha, cfg.virtual_loss));
+                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.dirichlet_alpha, cfg.dirichlet_epsilon, cfg.virtual_loss));
                 all_mcts.back()->set_neural_worker(neural_worker.get());
             }
 
@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
                             &local_buffer,
                             net, net,
                             cfg.steps_before_tau_0, cfg.mcts_batches, cfg.mcts_batch_size,
-                            std::nullopt, device
+                            cfg.c_discount, device
                         );
 
                         // 2. Fine-grained locking: Only lock when pushing the completed batch
@@ -365,29 +365,6 @@ int main(int argc, char** argv) {
             << ", replay " << replay_buffer.size() << std::endl;
 
         step_idx++;
-        /*auto update_optimizer_lr = [&](float new_lr) {
-            for (auto& param_group : optimizer.param_groups()) {
-                static_cast<torch::optim::SGDOptions&>(param_group.options()).lr(new_lr);
-            }
-            std::cout << "[LR Decay] Learning rate adjusted to: " << new_lr << std::endl;
-            };
-
-        if (step_idx == cfg.adjusted_idx_1) {
-            cfg.learning_rate = cfg.learning_rate_adjusted_1;
-            update_optimizer_lr(cfg.learning_rate);
-        }
-        if (step_idx == cfg.adjusted_idx_2) {
-            cfg.learning_rate = cfg.learning_rate_adjusted_2;
-            update_optimizer_lr(cfg.learning_rate);
-        }
-        if (step_idx == cfg.adjusted_idx_3) {
-            cfg.learning_rate = cfg.learning_rate_adjusted_3;
-            update_optimizer_lr(cfg.learning_rate);
-        }
-        if (step_idx == cfg.adjusted_idx_4) {
-            cfg.learning_rate = cfg.learning_rate_adjusted_4;
-            update_optimizer_lr(cfg.learning_rate);
-        } */
 
         // Check for termination after episodes
         if (terminate_requested) break;
@@ -398,6 +375,13 @@ int main(int argc, char** argv) {
                 << replay_buffer.size() << "/" << cfg.min_replay_to_train << ")" << std::endl;
             continue;
         }
+
+        /*for (auto& group : optimizer.param_groups()) {
+            auto& options = static_cast<torch::optim::AdamWOptions&>(group.options());
+            // Multiply current weight_decay by the same gamma factor used for LR
+            options.weight_decay(options.weight_decay() * cfg.learning_rate_decay);
+            options.lr(options.lr() * cfg.learning_rate_decay);
+        } */
 
         // Training phase
         float sum_loss = 0.0f;
@@ -490,7 +474,7 @@ int main(int argc, char** argv) {
             loss_policy_v = loss_policy_v.sum(1).mean();
 
 
-            auto loss_v = loss_policy_v + 1.5 * loss_value_v;
+            auto loss_v = cfg.c_loss_policy * loss_policy_v + cfg.c_loss_value * loss_value_v;
             loss_v.backward();
 
             torch::nn::utils::clip_grad_norm_(net->parameters(), 1.0);

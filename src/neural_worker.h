@@ -52,7 +52,7 @@ namespace Connect4 {
                 stream_ = c10::cuda::getStreamFromPool();
 
                 // 1. PINNED CPU buffer (zero-copy async H2D compatible)
-                cpu_staging_buffer_ = torch::empty(
+                cpu_staging_buffer_ = torch::zeros(
                     { batch_size_, 4, GAME_ROWS, GAME_COLS },
                     torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true)
                 );
@@ -111,14 +111,16 @@ namespace Connect4 {
 
                     auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::microseconds(10);
-                    while (batch.size() < static_cast<size_t>(batch_size_) &&
-                        !queue_.empty()) {
+                    while (batch.size() < static_cast<size_t>(batch_size_)) {
                         auto remaining = deadline - std::chrono::steady_clock::now();
-                        if (remaining <= std::chrono::milliseconds::zero()) break;
-                        if (cv_.wait_for(lock, remaining,
-                            [this] { return !queue_.empty(); })) {
+                        if (remaining <= std::chrono::microseconds::zero()) break;
+
+                        if (cv_.wait_for(lock, remaining, [this] { return !queue_.empty(); })) {
                             batch.push_back(std::move(queue_.front()));
                             queue_.pop();
+                        }
+                        else {
+                            break; // Timeout expired, stop accumulating
                         }
                     }
                 }
@@ -135,7 +137,7 @@ namespace Connect4 {
                 if (device_.is_cuda()) {
                     c10::cuda::CUDAStreamGuard guard(stream_);
 
-                    // 1. Fill CPU staging buffer (fast, no GPU access violations)
+                    // 1. Fill CPU staging buffer (only fills up to actual_batch)
                     state_lists_to_batches(cpu_staging_buffer_, states, players);
 
                     // 2. Async Host-to-Device copy
@@ -145,33 +147,40 @@ namespace Connect4 {
                         cudaMemcpyHostToDevice,
                         stream_.stream());
 
-                    // 3. Run inference on GPU buffer
-                    auto input_view = gpu_input_buffer_.narrow(0, 0, static_cast<int64_t>(batch.size()));
+                    // 3. Pad to next power of 2 to prevent caching allocator fragmentation
+                    int64_t actual_batch = batch.size();
+                    int64_t padded_batch = 1;
+                    while (padded_batch < actual_batch) padded_batch *= 2;
+                    if (padded_batch > batch_size_) padded_batch = batch_size_;
 
-                    torch::NoGradGuard no_grad;
+                    auto input_view = gpu_input_buffer_.narrow(0, 0, padded_batch);
+
+                    torch::InferenceMode infer_guard;
                     auto output = net_->forward(input_view);
 
                     auto probs_gpu = torch::softmax(std::get<0>(output), 1);
                     auto values_gpu = std::get<1>(output);
 
-                    // 4. Async Device-to-Host copy for results
-                    auto probs_view = pinned_probs_host_.narrow(0, 0, static_cast<int64_t>(batch.size()));
-                    auto values_view = pinned_values_host_.narrow(0, 0, static_cast<int64_t>(batch.size()));
+                    // 4. Async Device-to-Host copy (ONLY copy actual_batch results, ignoring padded dummies)
+                    cudaMemcpyAsync(pinned_probs_host_.data_ptr<float>(),
+                        probs_gpu.data_ptr<float>(),
+                        actual_batch * GAME_COLS * sizeof(float),
+                        cudaMemcpyDeviceToHost, stream_.stream());
 
-                    cudaMemcpyAsync(probs_view.data_ptr<float>(), probs_gpu.data_ptr<float>(),
-                        probs_view.nbytes(), cudaMemcpyDeviceToHost, stream_.stream());
-                    cudaMemcpyAsync(values_view.data_ptr<float>(), values_gpu.data_ptr<float>(),
-                        values_view.nbytes(), cudaMemcpyDeviceToHost, stream_.stream());
+                    cudaMemcpyAsync(pinned_values_host_.data_ptr<float>(),
+                        values_gpu.data_ptr<float>(),
+                        actual_batch * sizeof(float),
+                        cudaMemcpyDeviceToHost, stream_.stream());
 
                     // 5. Wait for GPU work + D2H copies to complete
                     sync_event_.record(stream_);
-                    sync_event_.synchronize(); // CPU blocks here
+                    sync_event_.synchronize();
 
                     // 6. Distribute results
-                    const float* probs_ptr = probs_view.data_ptr<float>();
-                    const float* values_ptr = values_view.data_ptr<float>();
+                    const float* probs_ptr = pinned_probs_host_.data_ptr<float>();
+                    const float* values_ptr = pinned_values_host_.data_ptr<float>();
 
-                    for (size_t i = 0; i < batch.size(); ++i) {
+                    for (size_t i = 0; i < actual_batch; ++i) {
                         std::array<float, GAME_COLS> probs;
                         std::memcpy(probs.data(), probs_ptr + i * GAME_COLS, GAME_COLS * sizeof(float));
                         batch[i].promise.set_value({ probs, values_ptr[i] });

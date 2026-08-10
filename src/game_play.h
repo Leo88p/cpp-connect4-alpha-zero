@@ -21,7 +21,7 @@ namespace Connect4 {
         int steps_before_tau_0,
         int mcts_searches,
         int mcts_batch_size,
-        std::optional<bool> net1_plays_first,
+        float c_discount,
         const torch::Device& device);
 
 } // namespace Connect4

@@ -1,33 +1,29 @@
 # --- Run Settings ---
-run_name = connect4_exp_03
+run_name = connect4_exp_04
 device_str = cuda
 net_to_load =
 
 # --- MCTS & Game Settings ---
-play_episodes = 512
-parallel_games = 512
+play_episodes = 1024
+parallel_games = 1024
 mcts_batches = 8
-mcts_batch_size = 8
-steps_before_tau_0 = 10
+mcts_batch_size = 4
+steps_before_tau_0 = 5
 virtual_loss = 1
 c_puct = 1
-dirichlet_alpha = 1
+dirichlet_alpha = 1.5
+dirichlet_epsilon = 0.5
 
 # --- Training Settings ---
 batch_size = 1024
-train_rounds = 32
+train_rounds = 128
 learning_rate = 0.001
-learning_rate_adjusted_1 = 0.03
-learning_rate_adjusted_2 = 0.01
-learning_rate_adjusted_3 = 0.003
-learning_rate_adjusted_4 = 0.001
-adjusted_idx_1 = 20
-adjusted_idx_2 = 60
-adjusted_idx_3 = 100
-adjusted_idx_4 = 200
+c_discount = 1
+c_loss_policy = 1
+c_loss_value = 1
 
 # --- Buffer & Network Architecture ---
-replay_buffer_size = 160000
+replay_buffer_size = 1000000
 min_replay_to_train = 500
-num_blocks = 10
+num_blocks = 3
 num_filters = 64

@@ -46,25 +46,15 @@ namespace Connect4 {
         int steps_before_tau_0,
         int mcts_searches,
         int mcts_batch_size,
-        std::optional<bool> net1_plays_first,
+        float c_discount,
         const torch::Device& device) {
 
         // Default constructor creates a clean, empty initial state
         GameState state;
         std::vector<Connect4Net> nets = { net1, net2 };
 
-        int cur_player_int;
-        if (net1_plays_first.has_value()) {
-            cur_player_int = net1_plays_first.value() ? 0 : 1;
-        }
-        else {
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<> dis(0, 1);
-            cur_player_int = dis(gen);
-        }
-
-        Player cur_player = static_cast<Player>(cur_player_int);
+        int cur_player_int = 0;
+        Player cur_player = Player::BLACK;
         int step = 0;
         float tau = steps_before_tau_0 > 0 ? 1.0f : 0.0f;
 
@@ -142,7 +132,7 @@ namespace Connect4 {
                 // The result from the perspective of the flipped state's player is inverted.
                 local_buffer->emplace_back(std::make_tuple(flipped, p, flipped_probs, current_result));
 
-                current_result = -current_result;
+                current_result = -current_result * c_discount;
             }
         }
 

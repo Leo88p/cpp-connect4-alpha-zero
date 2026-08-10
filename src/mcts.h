@@ -34,7 +34,7 @@ namespace Connect4 {
 
     class MCTS {
     public:
-        explicit MCTS(float c_puct = 1.0f, float dirichlet_alpha = 1.0f, float virtual_loss = 2.0f);
+        explicit MCTS(float c_puct = 1.0f, float dirichlet_alpha = 1.0f, float dirichlet_epsilon = 0.25f, float virtual_loss = 2.0f);
         MCTS(const MCTS&) = delete;
         MCTS& operator=(const MCTS&) = delete;
         MCTS(MCTS&&) = default;
@@ -73,6 +73,7 @@ namespace Connect4 {
         std::pmr::unordered_map<uint64_t, MCTSNode> tree_;
         float c_puct_;
         float dirichlet_alpha;
+        float dirichlet_epsilon;
         float virtual_loss_;
 
         // Random number generation for Dirichlet noise

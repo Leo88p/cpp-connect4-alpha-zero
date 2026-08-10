@@ -53,7 +53,7 @@ TEST_CASE("Basic MCTS test") {
 TEST_CASE("MCTS win in 1 test") {
     GameState state;
     apply_moves(state, { 1, 2, 1, 2, 1, 2 });
-    MCTS mcts(1, 0, 1);
+    MCTS mcts(1, 0, 0, 1);
     mcts.search_batch(8, 1, state, Player::BLACK);
     auto policy = mcts.get_policy_value(state, 1).first;
     auto max_it = std::max_element(policy.begin(), policy.end());

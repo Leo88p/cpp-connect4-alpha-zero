@@ -24,8 +24,8 @@ namespace Connect4 {
         std::fill(probs.begin(), probs.end(), 0.0f);
     }
 
-    MCTS::MCTS(float c_puct, float dirichlet_alpha, float virtual_loss)
-        : c_puct_(c_puct), dirichlet_alpha(dirichlet_alpha), virtual_loss_(virtual_loss),
+    MCTS::MCTS(float c_puct, float dirichlet_alpha, float dirichlet_epsilon, float virtual_loss)
+        : c_puct_(c_puct), dirichlet_alpha(dirichlet_alpha), dirichlet_epsilon(dirichlet_epsilon), virtual_loss_(virtual_loss),
         tree_(&pool_resource_) { // Bind the map to the lock-free pool resource
         std::random_device rd;
         rng_.seed(rd());
@@ -96,7 +96,7 @@ namespace Connect4 {
             else {
                 if (cur_state.key() == root_state.key() && use_noise) {
                     for (int i = 0; i < GAME_COLS; ++i) {
-                        score[i] = node.value_avg(i) + c_puct_ * (0.85f * probs[i] + 0.15f * dirichlet_noise[i]) *
+                        score[i] = node.value_avg(i) + c_puct_ * ((1 - dirichlet_epsilon) * probs[i] + dirichlet_epsilon * dirichlet_noise[i]) *
                             total_sqrt / (1.0f + static_cast<float>(counts[i]));
                     }
                 }
@@ -241,7 +241,9 @@ namespace Connect4 {
                         if (nonLosingCount == 0) {
                             for (int col = 0; col < Connect4::GAME_COLS; ++col) {
                                 valid_mask[col] = leaf_state.canPlay(col);
-                                valid_count++;
+                                if (valid_mask[col]) {
+                                    valid_count++;
+                                }
                             }
                         }
                         else {
@@ -399,6 +401,15 @@ namespace Connect4 {
                     float sum = std::accumulate(node.probs.begin(), node.probs.end(), 0.0f);
                     if (sum > 1e-8f) {
                         for (float& p : node.probs) p /= sum;
+                    }
+                    else {
+                        // FALLBACK: If NN policy is masked out entirely, fall back to uniform over valid moves
+                        int valid_count = 0;
+                        for (int j = 0; j < GAME_COLS; ++j) if (valid_mask[j]) valid_count++;
+                        float uniform_prob = (valid_count > 0) ? (1.0f / valid_count) : 0.0f;
+                        for (int j = 0; j < GAME_COLS; ++j) {
+                            node.probs[j] = valid_mask[j] ? uniform_prob : 0.0f;
+                        }
                     }
 
                     // Back up values through all backup entries for this leaf
