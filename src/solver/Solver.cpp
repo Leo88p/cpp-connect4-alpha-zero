@@ -143,5 +143,76 @@ Solver::Solver() : nodeCount{0} {
     columnOrder[i] = GAME_COLS / 2 + (1 - 2 * (i % 2)) * (i + 1) / 2; // example for WIDTH=7: columnOrder = {3, 4, 2, 5, 1, 6, 0}
 }
 
+int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
+    nodeCount++;
+    if (P.canWinNext()) {
+        return 1;
+    }
+
+    uint64_t possible = P.possibleNonLosingMoves();
+    if (possible == 0) {
+        return -1;
+    }
+
+    if (P.nbMoves() >= GAME_COLS * GAME_ROWS - 2) {
+        return 0;
+    }
+
+    if (depth <= 0) {
+        return 0;
+    }
+
+    MoveSorter moves;
+    for (int i = GAME_COLS; i--;) {
+        if (uint64_t move = possible & GameState::column_mask(columnOrder[i])) {
+            moves.add(move, P.moveScore(move));
+        }
+    }
+
+    int best_score = -1;
+    while (uint64_t next = moves.getNext()) {
+        GameState P2(P);
+        P2.play(next); 
+        int score = -negamax_depth(P2, -beta, -alpha, depth - 1);
+
+        if (score > best_score) best_score = score;
+        if (score >= beta) return score;
+        if (score > alpha) alpha = score;
+    }
+
+    return best_score;
+}
+
+
+int Solver::solve_depth_limited(const GameState& P, int max_depth) {
+    if (P.canWinNext()) return (GAME_COLS * GAME_ROWS + 1 - P.nbMoves()) / 2;
+    if (max_depth <= 0) return 0;
+
+    // We only care about the sign: >0 (Win), <0 (Loss), 0 (Unknown).
+    // Null window search [-1, 1] is fastest for this.
+    return negamax_depth(P, -1, 1, max_depth);
+}
+
+std::vector<int> Solver::analyze_depth(const GameState& P, int max_depth) {
+    std::vector<int> scores(GAME_COLS, Solver::INVALID_MOVE);
+
+    for (int col = 0; col < GAME_COLS; col++) {
+        if (P.canPlay(col)) {
+            if (P.isWinningMove(col)) {
+                scores[col] = 1;
+            }
+            else {
+                GameState P2(P);
+                P2.playCol(col);
+
+                int opp_score = solve_depth_limited(P2, max_depth - 1);
+                scores[col] = -opp_score;
+            }
+        }
+    }
+    return scores;
+}
+
+
 } // namespace Connect4
 } // namespace GameSolver

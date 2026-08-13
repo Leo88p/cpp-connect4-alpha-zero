@@ -136,13 +136,13 @@ namespace Connect4 {
 
             float* our_plane = ptr + idx * sample_stride + 0 * channel_stride;
             float* their_plane = ptr + idx * sample_stride + 1 * channel_stride;
-            float* player_plane = ptr + idx * sample_stride + 2 * channel_stride;
+            float* constant_plane = ptr + idx * sample_stride + 2 * channel_stride;
             float* last_plane = ptr + idx * sample_stride + 3 * channel_stride;
 
             // Zero out planes (CPU-safe and fast)
             std::memset(our_plane, 0, channel_stride * sizeof(float));
             std::memset(their_plane, 0, channel_stride * sizeof(float));
-            std::memset(player_plane, 0, channel_stride * sizeof(float));
+            std::memset(constant_plane, 0, channel_stride * sizeof(float));
             std::memset(last_plane, 0, channel_stride * sizeof(float));
 
             // Unpack bits to the 6x7 grid.
@@ -166,7 +166,7 @@ namespace Connect4 {
                     if (last_move & (1ULL << pos)) {
                         last_plane[tensor_idx] = 1.0f;
                     }
-                    player_plane[tensor_idx] = state.nbMoves() % 2;
+                    constant_plane[tensor_idx] = 1.0f;
                 }
             }
         }

@@ -46,6 +46,7 @@ namespace Connect4 {
         int steps_before_tau_0 = 10;
         int num_blocks = 5;
         int num_filters = 64;
+        int solver_depth = 1;
 
         // Size parameters
         size_t replay_buffer_size = 1000000;
@@ -103,6 +104,7 @@ namespace Connect4 {
                 else if (key == "steps_before_tau_0") steps_before_tau_0 = std::stoi(value);
                 else if (key == "num_blocks") num_blocks = std::stoi(value);
                 else if (key == "num_filters") num_filters = std::stoi(value);
+                else if (key == "solver_depth") solver_depth = std::stoi(value);
 
                 else if (key == "replay_buffer_size") replay_buffer_size = std::stoull(value);
                 else if (key == "min_replay_to_train") min_replay_to_train = std::stoull(value);

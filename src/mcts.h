@@ -14,6 +14,7 @@
 #include "connect4_game.h"
 #include "model.h"
 #include "neural_worker.h"
+#include "solver/Solver.hpp"
 
 namespace Connect4 {
 
@@ -34,7 +35,7 @@ namespace Connect4 {
 
     class MCTS {
     public:
-        explicit MCTS(float c_puct = 1.0f, float dirichlet_alpha = 1.0f, float dirichlet_epsilon = 0.25f, float virtual_loss = 2.0f);
+        explicit MCTS(float c_puct = 1.0f, float dirichlet_alpha = 1.0f, float dirichlet_epsilon = 0.25f, float virtual_loss = 2.0f, int solver_depth = 1);
         MCTS(const MCTS&) = delete;
         MCTS& operator=(const MCTS&) = delete;
         MCTS(MCTS&&) = default;
@@ -63,6 +64,7 @@ namespace Connect4 {
         void set_neural_worker(NeuralWorker* worker) {
             neural_worker_ = worker;
         }
+        std::pair<std::array<bool, Connect4::GAME_COLS>, std::array<bool, Connect4::GAME_COLS>> get_move_masks(const GameState& state);
         void set_c_puct(float new_c_puct) { c_puct_ = new_c_puct; }
 
     private:
@@ -75,6 +77,7 @@ namespace Connect4 {
         float dirichlet_alpha;
         float dirichlet_epsilon;
         float virtual_loss_;
+        int SOLVER_DEPTH = 3;
 
         // Random number generation for Dirichlet noise
         std::mt19937 rng_;
@@ -82,5 +85,6 @@ namespace Connect4 {
 
         std::array<float, GAME_COLS> generate_dirichlet_noise();
         std::array<float, GAME_COLS> dirichlet_noise;
+        GameSolver::Solver solver_;
     };
 }

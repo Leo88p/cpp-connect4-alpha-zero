@@ -14,7 +14,7 @@ namespace Connect4 {
 
     // Play game function
     std::pair<float, int> play_game(
-        const std::unique_ptr<MCTS>* mcts_stores,
+        MCTS& mcts_store,
         std::vector<ReplayBuffer::value_type>* local_buffer,
         Connect4Net& net1,
         Connect4Net& net2,

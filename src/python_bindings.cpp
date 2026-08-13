@@ -261,8 +261,8 @@ private:
 // Wrapper for MCTS
 class PyMCTS {
 public:
-    PyMCTS(float c_puct = 1.0f, float virtual_loss = 2.0f)
-        : mcts(c_puct, 0, 0, virtual_loss) {
+    PyMCTS(float c_puct = 1.0f, float virtual_loss = 2.0f, int solver_depth = 5)
+        : mcts(c_puct, 0, 0, virtual_loss, solver_depth) {
         mcts.use_noise = false;
     }
 
@@ -368,8 +368,8 @@ PYBIND11_MODULE(_C, m) {
             py::arg("net"), py::arg("device"), py::arg("max_batch_size") = 256);
 
     py::class_<PyMCTS>(m, "MCTS")
-        .def(py::init<float, float>(),
-            py::arg("c_puct") = 1.0f, py::arg("virtual_loss") = 2.0f)
+        .def(py::init<float, float, int>(),
+            py::arg("c_puct") = 1.0f, py::arg("virtual_loss") = 2.0f, py::arg("solver_depth") = 5)
         .def("set_neural_worker", &PyMCTS::set_neural_worker, py::arg("worker"))
         .def("search_batch", &PyMCTS::search_batch,
             py::call_guard<py::gil_scoped_release>(),

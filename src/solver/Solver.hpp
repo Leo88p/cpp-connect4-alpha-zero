@@ -48,6 +48,7 @@ class Solver {
    * - if alpha <= actual score <= beta then return value = actual score
    */
   int negamax(const GameState &P, int alpha, int beta);
+  int negamax_depth(const GameState& P, int alpha, int beta, int depth);
 
  public:
   static const int INVALID_MOVE = -1000;
@@ -71,6 +72,8 @@ class Solver {
   void loadBook(std::string book_file) {
     book.load(book_file);
   }
+  int solve_depth_limited(const GameState& P, int max_depth);
+  std::vector<int> analyze_depth(const GameState& P, int max_depth);
 
   Solver(); // Constructor
 };

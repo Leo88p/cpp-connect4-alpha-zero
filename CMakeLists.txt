@@ -109,6 +109,7 @@ endfunction()
 add_executable(Connect4AlphaZero 
     "${CMAKE_CURRENT_SOURCE_DIR}/src/training_loop.cpp" 
     ${GAME_LOGIC_SOURCES}
+    ${GAME_SOLVER_SOURCES}
 )
 
 target_link_libraries(Connect4AlphaZero PRIVATE 
@@ -143,6 +144,7 @@ include(Catch)
 add_executable(Connect4Tests 
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test_connect4.cpp" 
     ${GAME_LOGIC_SOURCES}
+    ${GAME_SOLVER_SOURCES}
 )
 
 target_link_libraries(Connect4Tests PRIVATE 

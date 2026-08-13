@@ -280,33 +280,33 @@ int main(int argc, char** argv) {
         std::atomic<int> atomic_game_steps{ 0 };
         std::atomic<int> atomic_total_leaves{ 0 };
         {
-            torch::NoGradGuard no_grad;
-
-            // Pre-allocate MCTS instances for each persistent worker
+            // Pre-allocate MCTS instances
             std::vector<std::unique_ptr<MCTS>> all_mcts;
-            all_mcts.reserve(cfg.parallel_games); 
+            all_mcts.reserve(cfg.parallel_games);
             for (int i = 0; i < cfg.parallel_games; ++i) {
-                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.dirichlet_alpha, cfg.dirichlet_epsilon, cfg.virtual_loss));
+                all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.dirichlet_alpha, 
+                    cfg.dirichlet_epsilon, cfg.virtual_loss, cfg.solver_depth));
                 all_mcts.back()->set_neural_worker(neural_worker.get());
             }
 
             std::mutex replay_mutex;
-
-            // Atomic counters to avoid main-thread aggregation bottlenecks
             std::atomic<int> next_episode{ 0 };
 
-            // 1. Spawn persistent workers dynamically
-            std::vector<std::jthread> workers;
+            // 1. Use std::thread instead of std::jthread
+            std::vector<std::thread> workers;
             workers.reserve(cfg.parallel_games);
 
             for (int worker_id = 0; worker_id < cfg.parallel_games; ++worker_id) {
-                workers.emplace_back([&, worker_id](std::stop_token st) {
-                    // Each worker gets its own local buffer to minimize lock contention
+                // Remove std::stop_token from the lambda signature
+                workers.emplace_back([&, worker_id] {
+                    // CRITICAL FIX: Move NoGradGuard (or InferenceModeGuard) INSIDE the worker thread
+                    torch::NoGradGuard no_grad;
+
                     std::vector<ReplayBuffer::value_type> local_buffer;
                     local_buffer.reserve(84);
 
-                    while (!st.stop_requested()) {
-                        // Dynamic allocation: completed tasks immediately trigger new assignments
+                    while (true) { // No stop token needed; rely purely on episode_idx
+                        all_mcts[worker_id]->clear();
                         int episode_idx = next_episode.fetch_add(1, std::memory_order_relaxed);
 
                         if (episode_idx >= cfg.play_episodes) {
@@ -314,14 +314,14 @@ int main(int argc, char** argv) {
                         }
 
                         auto [game_result, steps] = play_game(
-                            &all_mcts[worker_id],
+                            *all_mcts[worker_id],
                             &local_buffer,
                             net, net,
                             cfg.steps_before_tau_0, cfg.mcts_batches, cfg.mcts_batch_size,
                             cfg.c_discount, device
                         );
 
-                        // 2. Fine-grained locking: Only lock when pushing the completed batch
+                        // 2. Fine-grained locking
                         {
                             std::lock_guard<std::mutex> lock(replay_mutex);
                             for (const auto& exp : local_buffer) {
@@ -331,13 +331,18 @@ int main(int argc, char** argv) {
                                 }
                             }
                         }
-                        local_buffer.clear(); // Reuse capacity for the next game
+                        local_buffer.clear();
 
                         // 3. Lock-free stat aggregation
                         atomic_game_steps.fetch_add(steps, std::memory_order_relaxed);
                         atomic_total_leaves.fetch_add(static_cast<int>(all_mcts[worker_id]->size()), std::memory_order_relaxed);
                     }
                     });
+            }
+
+            // CRITICAL FIX: Wait for all threads to finish naturally before exiting the scope
+            for (auto& worker : workers) {
+                worker.join();
             }
         }
 

@@ -41,9 +41,6 @@ namespace Connect4 {
     };
 
     TORCH_MODULE(Connect4Net);
-
-    void fuse_conv_bn(torch::nn::Conv2dImpl& conv_impl, torch::nn::BatchNorm2dImpl& bn_impl);
-    void fuse_linear_bn(torch::nn::Linear& linear, torch::nn::BatchNorm1d& bn);
     // Function to convert game states to batch tensor
     void state_lists_to_batches(torch::Tensor& cpu_buffer,
         const std::vector<GameState>& states,

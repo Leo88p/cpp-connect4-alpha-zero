@@ -39,7 +39,7 @@ namespace Connect4 {
     }
 
     std::pair<float, int> play_game(
-        const std::unique_ptr<MCTS>* mcts_store,
+        MCTS& mcts_store,
         std::vector<ReplayBuffer::value_type>* local_buffer,
         Connect4Net& net1,
         Connect4Net& net2,
@@ -51,7 +51,6 @@ namespace Connect4 {
 
         // Default constructor creates a clean, empty initial state
         GameState state;
-        std::vector<Connect4Net> nets = { net1, net2 };
 
         int cur_player_int = 0;
         Player cur_player = Player::BLACK;
@@ -74,7 +73,7 @@ namespace Connect4 {
                 throw std::runtime_error("Invalid player index for MCTS stores");
             }
 
-            auto& mcts = *mcts_store;
+            auto mcts = &mcts_store;
             mcts->search_batch(mcts_searches, mcts_batch_size, state, cur_player);
 
             auto [probs, _] = mcts->get_policy_value(state, tau);
@@ -135,7 +134,6 @@ namespace Connect4 {
                 current_result = -current_result * c_discount;
             }
         }
-
         return { net1_result, step };
     }
 }

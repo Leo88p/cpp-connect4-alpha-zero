@@ -24,8 +24,9 @@ namespace Connect4 {
         std::fill(probs.begin(), probs.end(), 0.0f);
     }
 
-    MCTS::MCTS(float c_puct, float dirichlet_alpha, float dirichlet_epsilon, float virtual_loss)
-        : c_puct_(c_puct), dirichlet_alpha(dirichlet_alpha), dirichlet_epsilon(dirichlet_epsilon), virtual_loss_(virtual_loss),
+    MCTS::MCTS(float c_puct, float dirichlet_alpha, float dirichlet_epsilon, float virtual_loss, int solver_depth)
+        : c_puct_(c_puct), dirichlet_alpha(dirichlet_alpha), dirichlet_epsilon(dirichlet_epsilon),
+        virtual_loss_(virtual_loss), SOLVER_DEPTH(solver_depth),
         tree_(&pool_resource_) { // Bind the map to the lock-free pool resource
         std::random_device rd;
         rng_.seed(rd());
@@ -35,6 +36,7 @@ namespace Connect4 {
 
     void MCTS::clear() {
         tree_.clear();
+        solver_.reset();
     }
 
     size_t MCTS::size() const {
@@ -72,15 +74,16 @@ namespace Connect4 {
             const auto& node = tree_.at(cur_key);
 
             float total_sqrt = std::sqrt(static_cast<float>(std::accumulate(
-                node.visit_count.begin(), node.visit_count.end(), 0)));
+                node.visit_count.begin(), node.visit_count.end(), 0)) + 1.0f);
 
             std::array<float, GAME_COLS> score;
             const auto& probs = node.probs;
             const auto& counts = node.visit_count;
+            auto [winning_mask, valid_mask] = get_move_masks(cur_state);
             int winningMovesCount = 0;
 
             for (int i = 0; i < GAME_COLS; ++i) {
-                if (cur_state.isWinningMove(i)) {
+                if (winning_mask[i]) {
                     winningMovesCount++;
                     score[i] = 1;
                 }
@@ -108,20 +111,6 @@ namespace Connect4 {
                 }
             }
 
-            std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
-            int nonLosingCount = 0;
-            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                valid_mask[col] = cur_state.canPlayNonLosingMove(col);
-                if (valid_mask[col]) {
-                    nonLosingCount++;
-                }
-            }
-            if (nonLosingCount == 0) {
-                for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                    valid_mask[col] = cur_state.canPlay(col);
-                }
-            }
-
             int best_action = -1;
             float best_score = -std::numeric_limits<float>::infinity();
 
@@ -146,7 +135,7 @@ namespace Connect4 {
                 virtual_loss_path->emplace_back(cur_key, best_action);
             }
 
-            if (cur_state.isWinningMove(best_action)) {
+            if (winning_mask[best_action]) {
                 value = -1.0f;
                 cur_state.playCol(best_action);
                 return { value, cur_state, static_cast<Player>(1 - static_cast<int>(cur_player)),
@@ -168,6 +157,30 @@ namespace Connect4 {
     bool MCTS::is_leaf(const GameState& state) const {
         uint64_t key = state.key();
         return tree_.find(key) == tree_.end();
+    }
+    std::pair<std::array<bool, Connect4::GAME_COLS>, std::array<bool, Connect4::GAME_COLS>> MCTS::get_move_masks(const GameState& state) {
+
+        auto move_scores = solver_.analyze_depth(state, SOLVER_DEPTH);
+
+        std::array<bool, Connect4::GAME_COLS> valid_mask{};
+        std::array<bool, Connect4::GAME_COLS> winning_mask{};
+        int nonLosingCount = 0;
+        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+            valid_mask[col] = move_scores[col] >= 0;
+            if (valid_mask[col]) {
+                nonLosingCount++;
+            }
+        }
+        if (nonLosingCount == 0) {
+            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                valid_mask[col] = state.canPlay(col);
+            }
+        }
+        for (int i = 0; i < GAME_COLS; ++i) {
+            winning_mask[i] = move_scores[i] > 0;
+        }
+
+        return { winning_mask, valid_mask };
     }
 
     void MCTS::search_batch(int count, int batch_size, const GameState& state,
@@ -229,42 +242,17 @@ namespace Connect4 {
                     // CRITICAL: Immediately add leaf to tree with default policy
                     if (tree_.find(leaf_key) == tree_.end()) {
                         MCTSNode node;
-                        int valid_count = 0; // FIX 3: Properly count ONLY valid moves
-                        std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
-                        int nonLosingCount = 0;
-                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            valid_mask[col] = leaf_state.canPlayNonLosingMove(col);
-                            if (valid_mask[col]) {
-                                nonLosingCount++;
-                            }
-                        }
-                        if (nonLosingCount == 0) {
-                            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                                valid_mask[col] = leaf_state.canPlay(col);
-                                if (valid_mask[col]) {
-                                    valid_count++;
-                                }
-                            }
-                        }
-                        else {
-                            valid_count = nonLosingCount;
-                        }
-
-                        // Check for immediate win
-                        int winning_move = -1;
-                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            if (valid_mask[col] && leaf_state.isWinningMove(col)) {
-                                winning_move = col;
-                                break;
-                            }
-                        }
+                        auto [winning_mask, valid_mask] = get_move_masks(leaf_state);
+                        int nonLosingCount = std::count(valid_mask.begin(), valid_mask.end(), true);
+                        int winningCount = std::count(winning_mask.begin(), winning_mask.end(), true);
 
                         for (int j = 0; j < GAME_COLS; ++j) {
-                            if (winning_move != -1) {
-                                node.probs[j] = (j == winning_move) ? 1.0f : 0.0f;
+                            if (winningCount != 0) {
+                                node.probs[j] = winning_mask[j] ? (1.0f / winningCount) : 0.0f;
                             }
                             else {
-                                node.probs[j] = valid_mask[j] ? (1.0f / valid_count) : 0.0f;
+                                // FIX: Use 1.0f instead of uninitialized node.probs[j]
+                                node.probs[j] = valid_mask[j] ? (1.0f / nonLosingCount) : 0.0f;
                             }
                             node.visit_count[j] = 0;
                             node.value[j] = 0.0f;
@@ -325,34 +313,18 @@ namespace Connect4 {
                     }
                     else {
                         // FIX 4: Fallback uniform policy now correctly counts ONLY valid moves
-                        int valid_count = 0;
-                        int nonLosingCount = 0;
-                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            if (leaf_state.canPlayNonLosingMove(col)) {
-                                probs[col] = 1.0f;
-                                nonLosingCount++;
+                        auto [winning_mask, valid_mask] = get_move_masks(leaf_state);
+                        int nonLosingCount = std::count(valid_mask.begin(), valid_mask.end(), true);
+
+                        // Check for immediate win
+                        int winningCount = std::count(winning_mask.begin(), winning_mask.end(), true);
+
+                        for (int j = 0; j < GAME_COLS; ++j) {
+                            if (winningCount != 0) {
+                                probs[j] = winning_mask[j] ? 1.0f / winningCount : 0.0f;
                             }
                             else {
-                                probs[col] = 0.0f;
-                            }
-                        }
-                        if (nonLosingCount == 0) {
-                            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                                if (leaf_state.canPlay(col)) {
-                                    probs[col] = 1.0f;
-                                    valid_count++;
-                                }
-                                else {
-                                    probs[col] = 0.0f;
-                                }
-                            }
-                        }
-                        else {
-                            valid_count = nonLosingCount;
-                        }
-                        if (valid_count > 0) {
-                            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                                probs[col] /= valid_count;
+                                probs[j] = valid_mask[j] ? (1.0f / nonLosingCount) : 0.0f;
                             }
                         }
                         value = 0.0f;
@@ -360,39 +332,22 @@ namespace Connect4 {
 
                     // Update the node with real NN values
                     auto& node = tree_[leaf_key];
-                    std::vector<bool> valid_mask(Connect4::GAME_COLS, false);
-                    int nonLosingCount = 0;
-                    for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                        valid_mask[col] = leaf_state.canPlayNonLosingMove(col);
-                        if (valid_mask[col]) {
-                            nonLosingCount++;
-                        }
-                    }
-                    if (nonLosingCount == 0) {
-                        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                            valid_mask[col] = leaf_state.canPlay(col);
-                        }
-                    }
+                    auto [winning_mask, valid_mask] = get_move_masks(leaf_state);
+                    int nonLosingCount = std::count(valid_mask.begin(), valid_mask.end(), true);
 
-                    // Check for immediate win (override NN if needed)
-                    int winning_move = -1;
-                    for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-                        if (valid_mask[col] && leaf_state.isWinningMove(col)) {
-                            winning_move = col;
-                            break;
-                        }
-                    }
+                    // Check for immediate win
+                    int winningCount = std::count(winning_mask.begin(), winning_mask.end(), true);
 
-                    if (winning_move != -1) {
-                        // FIX 5: Force value to 1.0 for the current player if they have a guaranteed win.
-                        // Leaving the raw NN value here causes contradictory policy/value signals.
+                    if (winningCount != 0) {
                         value = 1.0f;
                         for (int j = 0; j < GAME_COLS; ++j) {
-                            node.probs[j] = (j == winning_move) ? 1.0f : 0.0f;
+                            // Force probability to 0 for all non-winning moves
+                            node.probs[j] = winning_mask[j] ? (1.0f / winningCount) : 0.0f;
                         }
                     }
                     else {
                         for (int j = 0; j < GAME_COLS; ++j) {
+                            // CRITICAL FIX: Actually apply the Neural Network's policy!
                             node.probs[j] = valid_mask[j] ? probs[j] : 0.0f;
                         }
                     }
@@ -404,8 +359,7 @@ namespace Connect4 {
                     }
                     else {
                         // FALLBACK: If NN policy is masked out entirely, fall back to uniform over valid moves
-                        int valid_count = 0;
-                        for (int j = 0; j < GAME_COLS; ++j) if (valid_mask[j]) valid_count++;
+                        int valid_count = std::count(valid_mask.begin(), valid_mask.end(), true);
                         float uniform_prob = (valid_count > 0) ? (1.0f / valid_count) : 0.0f;
                         for (int j = 0; j < GAME_COLS; ++j) {
                             node.probs[j] = valid_mask[j] ? uniform_prob : 0.0f;
@@ -459,7 +413,6 @@ namespace Connect4 {
             }
         }
     }
-
     std::pair<std::array<float, GAME_COLS>, std::array<float, GAME_COLS>>
         MCTS::get_policy_value(const GameState& state, float tau) const {
         uint64_t state_key = state.key();
