@@ -32,11 +32,16 @@ namespace Connect4 {
         rng_.seed(rd());
         dirichlet_dist_ = std::gamma_distribution<float>(dirichlet_alpha, 1.0f);
         tree_.reserve(10000);
+        if (solver_depth > 1) {
+            solver_ = std::make_unique<GameSolver::Solver>();
+        }
     }
 
     void MCTS::clear() {
         tree_.clear();
-        solver_.reset();
+        if (solver_ != nullptr) {
+            solver_->reset();
+        }
     }
 
     size_t MCTS::size() const {
@@ -160,24 +165,52 @@ namespace Connect4 {
     }
     std::pair<std::array<bool, Connect4::GAME_COLS>, std::array<bool, Connect4::GAME_COLS>> MCTS::get_move_masks(const GameState& state) {
 
-        auto move_scores = solver_.analyze_depth(state, SOLVER_DEPTH);
 
         std::array<bool, Connect4::GAME_COLS> valid_mask{};
         std::array<bool, Connect4::GAME_COLS> winning_mask{};
-        int nonLosingCount = 0;
-        for (int col = 0; col < Connect4::GAME_COLS; ++col) {
-            valid_mask[col] = move_scores[col] >= 0;
-            if (valid_mask[col]) {
-                nonLosingCount++;
-            }
-        }
-        if (nonLosingCount == 0) {
+
+        if (SOLVER_DEPTH == 0) {
             for (int col = 0; col < Connect4::GAME_COLS; ++col) {
                 valid_mask[col] = state.canPlay(col);
             }
         }
-        for (int i = 0; i < GAME_COLS; ++i) {
-            winning_mask[i] = move_scores[i] > 0;
+        else if (SOLVER_DEPTH == 1) {
+            int valid_count = 0;
+            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                winning_mask[col] = state.isWinningMove(col);
+                valid_mask[col] = state.canPlayNonLosingMove(col);
+                if (valid_mask[col]) {
+                    valid_count++;
+                }
+            }
+            if (valid_count == 0) {
+                for (int col = 0; col < Connect4::GAME_COLS; ++col) {;
+                    valid_mask[col] = state.canPlay(col);
+                }
+            }
+        }
+        else {
+            auto move_scores = solver_->analyze_depth(state, SOLVER_DEPTH);
+            int fastest_win = *std::max(move_scores.begin(), move_scores.end());
+            int longest_lose = -SOLVER_DEPTH;
+            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                if (move_scores[col] < 0 && move_scores[col] > longest_lose) {
+                    longest_lose = move_scores[col];
+                }
+            }
+            int nonLosingCount = 0;
+            for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                winning_mask[col] = fastest_win > 0 && move_scores[col] == fastest_win;
+                valid_mask[col] = move_scores[col] >= 0 || move_scores[col] == GameSolver::Solver::UNKNOW_MOVE;
+                if (valid_mask[col]) {
+                    nonLosingCount++;
+                }
+            }
+            if (nonLosingCount == 0) {
+                for (int col = 0; col < Connect4::GAME_COLS; ++col) {
+                    valid_mask[col] = move_scores[col] == longest_lose;
+                }
+            }
         }
 
         return { winning_mask, valid_mask };
@@ -192,9 +225,7 @@ namespace Connect4 {
     }
 
     void MCTS::search_minibatch(int count, const GameState& state, Player player) {
-        // FIX 1: Increased buffer from 8KB to 64KB to prevent silent heap fallback 
-        // during large minibatch constructions.
-        alignas(64) std::byte temp_buffer[65536];
+        alignas(64) std::byte temp_buffer[8196];
         std::pmr::monotonic_buffer_resource mbr{ temp_buffer, sizeof(temp_buffer), std::pmr::new_delete_resource() };
         std::pmr::polymorphic_allocator<void> alloc(&mbr);
 

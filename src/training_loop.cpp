@@ -275,7 +275,7 @@ int main(int argc, char** argv) {
         // Check for termination before starting episodes
         if (terminate_requested) break;
 
-        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, 12 * cfg.mcts_batch_size);
+        auto neural_worker = std::make_unique<Connect4::NeuralWorker>(net, device, cfg.parallel_games * cfg.mcts_batch_size);
         net->eval();
         std::atomic<int> atomic_game_steps{ 0 };
         std::atomic<int> atomic_total_leaves{ 0 };

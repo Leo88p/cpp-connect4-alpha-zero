@@ -85,6 +85,6 @@ namespace Connect4 {
 
         std::array<float, GAME_COLS> generate_dirichlet_noise();
         std::array<float, GAME_COLS> dirichlet_noise;
-        GameSolver::Solver solver_;
+        std::unique_ptr<GameSolver::Solver> solver_ = nullptr;
     };
 }

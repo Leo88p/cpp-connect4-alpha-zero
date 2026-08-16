@@ -146,12 +146,12 @@ Solver::Solver() : nodeCount{0} {
 int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
     nodeCount++;
     if (P.canWinNext()) {
-        return 1;
+        return depth;
     }
 
     uint64_t possible = P.possibleNonLosingMoves();
     if (possible == 0) {
-        return -1;
+        return -depth;
     }
 
     if (P.nbMoves() >= GAME_COLS * GAME_ROWS - 2) {
@@ -159,7 +159,7 @@ int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
     }
 
     if (depth <= 0) {
-        return 0;
+        return UNKNOW_MOVE;
     }
 
     MoveSorter moves;
@@ -185,12 +185,10 @@ int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
 
 
 int Solver::solve_depth_limited(const GameState& P, int max_depth) {
-    if (P.canWinNext()) return (GAME_COLS * GAME_ROWS + 1 - P.nbMoves()) / 2;
+    if (P.canWinNext()) return max_depth;
     if (max_depth <= 0) return 0;
 
-    // We only care about the sign: >0 (Win), <0 (Loss), 0 (Unknown).
-    // Null window search [-1, 1] is fastest for this.
-    return negamax_depth(P, -1, 1, max_depth);
+    return negamax_depth(P, -max_depth, max_depth, max_depth);
 }
 
 std::vector<int> Solver::analyze_depth(const GameState& P, int max_depth) {
@@ -199,7 +197,7 @@ std::vector<int> Solver::analyze_depth(const GameState& P, int max_depth) {
     for (int col = 0; col < GAME_COLS; col++) {
         if (P.canPlay(col)) {
             if (P.isWinningMove(col)) {
-                scores[col] = 1;
+                scores[col] = max_depth;
             }
             else {
                 GameState P2(P);
