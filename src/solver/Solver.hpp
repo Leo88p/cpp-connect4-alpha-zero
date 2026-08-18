@@ -52,7 +52,7 @@ class Solver {
 
  public:
   static const int INVALID_MOVE = -1000;
-  static const int UNKNOW_MOVE = -100;
+  static const int UNKNOWN_MOVE = -100;
 
   // Returns the score of a position
   int solve(const GameState &P, bool weak = false);

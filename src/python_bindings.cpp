@@ -4,11 +4,10 @@
 #include <bit> // Required for std::countr_zero
 
 #include "connect4_game.h"
-#include "mcts.h"
+#include "mcts_solver.h"
 #include "model.h"
 #include "game_play.h"
 #include "neural_worker.h"
-#include "solver/Solver.hpp"
 
 namespace py = pybind11;
 using namespace Connect4;
@@ -306,7 +305,7 @@ public:
     size_t size() const { return mcts.size(); }
 
 private:
-    MCTS mcts;
+    MCTSSolver mcts;
     std::unique_ptr<Connect4::NeuralWorker> neural_worker_ = nullptr;
     std::shared_ptr<Connect4::NeuralWorker> shared_worker_ = nullptr; // New member
 };

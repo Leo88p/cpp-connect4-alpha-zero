@@ -44,14 +44,17 @@ set(GAME_LOGIC_SOURCES
     "src/game_play.cpp"
     "src/mcts.cpp"
     "src/model.cpp"
-)
-# --- Pascal Pons' Solver ---
-set(GAME_SOLVER_SOURCES
+    "src/mcts_solver.cpp"
+    "src/mcts_solver.h"
     "src/solver/MoveSorter.hpp"
     "src/solver/OpeningBook.hpp"
     "src/solver/Solver.hpp"
     "src/solver/Solver.cpp"
     "src/solver/TranspositionTable.hpp"
+)
+# --- Pascal Pons' Solver ---
+set(GAME_SOLVER_SOURCES
+    
 )
 
 # -------------------------------------------------------------
@@ -109,7 +112,6 @@ endfunction()
 add_executable(Connect4AlphaZero 
     "${CMAKE_CURRENT_SOURCE_DIR}/src/training_loop.cpp" 
     ${GAME_LOGIC_SOURCES}
-    ${GAME_SOLVER_SOURCES}
 )
 
 target_link_libraries(Connect4AlphaZero PRIVATE 

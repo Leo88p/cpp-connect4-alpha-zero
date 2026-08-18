@@ -22,7 +22,7 @@
 #include <torch/optim.h>
 
 #include "connect4_game.h"
-#include "mcts.h"
+#include "mcts_solver.h"
 #include "model.h"
 #include "utils.h"
 #include "game_play.h"
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
             all_mcts.reserve(cfg.parallel_games);
             for (int i = 0; i < cfg.parallel_games; ++i) {
                 all_mcts.emplace_back(std::make_unique<MCTS>(cfg.c_puct, cfg.dirichlet_alpha, 
-                    cfg.dirichlet_epsilon, cfg.virtual_loss, cfg.solver_depth));
+                    cfg.dirichlet_epsilon, cfg.virtual_loss));
                 all_mcts.back()->set_neural_worker(neural_worker.get());
             }
 

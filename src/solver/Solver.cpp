@@ -159,7 +159,7 @@ int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
     }
 
     if (depth <= 0) {
-        return UNKNOW_MOVE;
+        return UNKNOWN_MOVE;
     }
 
     MoveSorter moves;
@@ -169,7 +169,7 @@ int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
         }
     }
 
-    int best_score = -1;
+    int best_score = INVALID_MOVE;
     while (uint64_t next = moves.getNext()) {
         GameState P2(P);
         P2.play(next); 
@@ -186,7 +186,7 @@ int Solver::negamax_depth(const GameState& P, int alpha, int beta, int depth) {
 
 int Solver::solve_depth_limited(const GameState& P, int max_depth) {
     if (P.canWinNext()) return max_depth;
-    if (max_depth <= 0) return 0;
+    if (max_depth <= 0) return UNKNOWN_MOVE;
 
     return negamax_depth(P, -max_depth, max_depth, max_depth);
 }

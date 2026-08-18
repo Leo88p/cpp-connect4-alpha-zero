@@ -3,10 +3,7 @@
 #include <optional>
 #include <tuple>
 #include <array>
-
-#include <torch/torch.h>
-
-#include "mcts.h"
+#include "mcts_solver.h"
 
 namespace Connect4 {
 
